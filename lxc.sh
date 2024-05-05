@@ -28,7 +28,25 @@ log() {
 check_result() {
     if [ $1 -ne 0 ]; then
         log "Error: $2"
+        try_restart_old_container
         exit 1
+    fi
+}
+
+# 函数：尝试重新启动旧容器
+try_restart_old_container() {
+    local old_container_status=$(pct status $old_container_id | grep -oP 'status: \K(\w+)')
+    if [ "$old_container_status" != "running" ]; then
+        log "Old container is not running. Attempting to restart..."
+        pct start $old_container_id
+        local start_result=$?
+        if [ $start_result -ne 0 ]; then
+            log "Failed to restart old container."
+        else
+            log "Old container restarted successfully."
+        fi
+    else
+        log "Old container is already running. No need to restart."
     fi
 }
 
