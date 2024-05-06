@@ -81,6 +81,8 @@ if echo "$wget_output" | grep -q "Omitting download"; then
         log "Script execution aborted."
         exit 0
     fi
+else
+    log "Download successful."	
 fi
 
 # 创建备份
