@@ -1,10 +1,26 @@
 #!/bin/bash
 
+# 默认值
+backup_and_clash="1"
+
+# 解析命令行参数
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -off)
+            backup_and_clash="0"
+            shift
+            ;;
+        *)
+            echo "未知选项：$1"
+            exit 1
+            ;;
+    esac
+done
+
 # 设置变量
 container_ids=(110 111)
 backup_file="/tmp/backup.tar.gz"
 download_url="https://github.com/closur3/OpenWrt-Mainline/releases/latest/download/openwrt-x86-64-generic-rootfs.tar.gz"
-enable_openclash="1"
 
 # 容器参数
 template="local:vztmpl/openwrt-x86-64-generic-rootfs.tar.gz"
@@ -58,6 +74,13 @@ get_running_vmid() {
 # 开始执行脚本
 log "Starting script..."
 
+# 检查备份是否开启
+if [ "$backup_and_clash" == "0" ]; then
+    log "Backup & Start OpenClash: disabled"
+else
+    log "Backup & Start OpenClash: enabled"
+fi
+
 # 获取正在运行的容器的 VMID
 running_vmid=$(get_running_vmid)
 
@@ -85,15 +108,14 @@ else
     log "Download successful."	
 fi
 
-# 创建备份
-log "Creating backup..."
-pct exec $old_container_id -- sysupgrade -b $backup_file
-check_result $? "Failed to create backup."
-
-# 从容器中拉取备份
-log "Pulling backup from container..."
-pct pull $old_container_id $backup_file ~/backup.tar.gz
-check_result $? "Failed to pull backup from container."
+# 创建备份并从容器中拉取备份
+if [ "$backup_and_clash" == "1" ]; then
+    log "Creating and pulling backup..."
+    pct exec $old_container_id -- sysupgrade -b $backup_file
+    check_result $? "Failed to create backup."
+    pct pull $old_container_id $backup_file ~/backup.tar.gz
+    check_result $? "Failed to pull backup from container."
+fi
 
 # 停止旧容器
 log "Stopping old container..."
@@ -109,15 +131,17 @@ check_result $? "Failed to start new container."
 sleep 10
 
 # 将备份推送到新容器并还原备份
-log "Performing sysupgrade in new container..."
-pct push $new_container_id ~/backup.tar.gz $backup_file
-check_result $? "Failed to push backup to new container."
-pct exec $new_container_id -- sysupgrade -r $backup_file
-check_result $? "Failed to perform sysupgrade in new container."
-sleep 5
+if [ "$backup_and_clash" == "1" ]; then
+    log "Performing sysupgrade in new container..."
+    pct push $new_container_id ~/backup.tar.gz $backup_file
+    check_result $? "Failed to push backup to new container."
+    pct exec $new_container_id -- sysupgrade -r $backup_file
+    check_result $? "Failed to perform sysupgrade in new container."
+    sleep 5
+fi
 
 # 启用并启动 openclash 服务
-if [ "$enable_openclash" == "1" ]; then
+if [ "$backup_and_clash" == "1" ]; then
     log "Enabling and starting openclash service in new container..."
     pct exec $new_container_id -- uci set openclash.config.enable='1'
     pct exec $new_container_id -- uci commit openclash
