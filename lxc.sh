@@ -99,9 +99,9 @@ fi
 log "Downloading OpenWrt release..."
 wget_output=$(wget -N $download_url -P /var/lib/vz/template/cache/ 2>&1)
 if echo "$wget_output" | grep -q "Omitting download"; then
-    read -p "The firmware doesn't seem to be updated. Do you want to continue? [y/n]: " choice
+    read -t 30 -p "The firmware doesn't seem to be updated. Do you want to continue? [y/n]: " choice
     if [ "$choice" != "y" ]; then
-        log "Script execution aborted."
+        log "Script execution aborted due to timeout or user input."
         exit 0
     fi
 else
