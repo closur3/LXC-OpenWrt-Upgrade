@@ -59,10 +59,11 @@ rootfs="local-lvm:1"
 ostype="unmanaged"
 hostname="OpenWrt"
 arch="amd64"
-cores=2
-memory=1024
-swap=0
+cores="2"
+memory="1024"
+swap="0"
 onboot="yes"
+startup="order=2"
 features="nesting=1"
 net0="name=eth0,bridge=vmbr0,firewall=1"
 
@@ -161,7 +162,7 @@ check_result $? "停止旧容器失败。"
 
 # 创建新容器
 log "创建新容器..."
-pct create $new_container_id $template --rootfs $rootfs --ostype $ostype --hostname $hostname --arch $arch --cores $cores --memory $memory --swap $swap --onboot $onboot --features $features --net0 $net0
+pct create $new_container_id $template --rootfs $rootfs --ostype $ostype --hostname $hostname --arch $arch --cores $cores --memory $memory --swap $swap --onboot $onboot --startup $startup --features $features --net0 $net0
 check_result $? "创建新容器失败。"
 pct start $new_container_id
 check_result $? "启动新容器失败。"
