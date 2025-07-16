@@ -43,13 +43,16 @@ if [ ! -f "$(dirname "$0")/lxc.sh.ini" ]; then
     cat > "$(dirname "$0")/lxc.sh.ini" <<EOF
 # lxc.sh 配置文件
 
+# VMID分配范围
+vmid_min=100
+vmid_max=999
+
 # 备份设置
 backup_enabled="1"
 # 还原备份后启动OpenClash
 openclash_enabled="1"
 
 # 容器设置
-container_ids=(110 111)  #2个ID，1是正在运行的OpenWrt的旧容器ID，2是未使用的用于新容器的ID。
 backup_file="/tmp/backup.tar.gz"
 download_url="https://github.com/closur3/OpenWrt-Mainline/releases/latest/download/openwrt-x86-64-generic-rootfs.tar.gz"
 
@@ -91,10 +94,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# 开始执行脚本
 log "开始执行脚本..."
 
-# 检查备份是否开启
 if [ "$backup_enabled" == "0" ]; then
     log "备份：已禁用"
     openclash_enabled="0"
@@ -102,7 +103,6 @@ else
     log "备份：已启用"
 fi
 
-# 检查是否启用 OpenClash
 if [ "$openclash_enabled" == "0" ]; then
     log "OpenClash：已禁用"
 else
@@ -112,26 +112,79 @@ fi
 # 获取正在运行的 OpenWrt 容器数量
 running_container_count=$(get_running_container_count "$hostname")
 if [ "$running_container_count" -eq 0 ]; then
-    log "未发现正在运行的 "$hostname" 容器，请确保至少一个容器正在运行。"
+    log "未发现正在运行的 $hostname 容器，请确保至少一个容器正在运行。"
     exit 1
 elif [ "$running_container_count" -gt 1 ]; then
-    log "有多个 "$hostname" 容器正在运行，请确保只有一个容器正在运行。"
+    log "有多个 $hostname 容器正在运行，请确保只有一个容器正在运行。"
     exit 1
 fi
 
 # 获取正在运行的 OpenWrt 容器的 VMID
 running_vmid=$(get_running_vmid "$hostname")
-
-# 根据正在运行的容器的 VMID 确定旧容器ID和新容器ID
-old_container_id=${container_ids[0]}
-new_container_id=${container_ids[1]}
-if [ "$running_vmid" == "${container_ids[1]}" ]; then
-    old_container_id=${container_ids[1]}
-    new_container_id=${container_ids[0]}
-elif [ -z "$running_vmid" ]; then
+if [ -z "$running_vmid" ]; then
     log "错误：无法确定运行中的 VMID。"
     exit 1
 fi
+
+# 自动分配新容器ID，确保与KVM不在同一百段并取最小空闲段
+lxc_vmids=($(pct list | awk 'NR>1 {print $1}'))
+kvm_vmids=($(qm list | awk 'NR>1 {print $1}'))
+all_vmids=($(printf "%s\n" "${lxc_vmids[@]}" "${kvm_vmids[@]}" | sort -n | uniq))
+
+old_container_id="$running_vmid"
+
+# 根据可配置的VMID范围进行分段
+vmid_min=${vmid_min:-100}
+vmid_max=${vmid_max:-999}
+seg_min=$((vmid_min / 100))
+seg_max=$((vmid_max / 100))
+
+declare -A kvm_hundred_flag
+for vmid in "${kvm_vmids[@]}"; do
+    if ((vmid >= vmid_min && vmid <= vmid_max)); then
+        segment=$((vmid / 100))
+        kvm_hundred_flag[$segment]=1
+    fi
+done
+
+new_container_id=""
+for seg in $(seq $seg_min $seg_max); do
+    seg_start=$((seg*100))
+    seg_end=$((seg_start+99))
+    # 只在配置范围内分配
+    [ $seg_start -lt $vmid_min ] && seg_start=$vmid_min
+    [ $seg_end -gt $vmid_max ] && seg_end=$vmid_max
+    if [ -z "${kvm_hundred_flag[$seg]}" ]; then
+        for ((i=seg_start; i<=seg_end; i++)); do
+            if [ "$i" != "$old_container_id" ] && ! printf '%s\n' "${all_vmids[@]}" | grep -qx "$i"; then
+                new_container_id=$i
+                break 2
+            fi
+        done
+    fi
+done
+
+if [ -z "$new_container_id" ]; then
+    for seg in $(seq $seg_min $seg_max); do
+        seg_start=$((seg*100))
+        seg_end=$((seg_start+99))
+        [ $seg_start -lt $vmid_min ] && seg_start=$vmid_min
+        [ $seg_end -gt $vmid_max ] && seg_end=$vmid_max
+        for ((i=seg_start; i<=seg_end; i++)); do
+            if [ "$i" != "$old_container_id" ] && ! printf '%s\n' "${all_vmids[@]}" | grep -qx "$i"; then
+                new_container_id=$i
+                break 2
+            fi
+        done
+    done
+fi
+
+if [ -z "$new_container_id" ]; then
+    log "错误：$vmid_min~$vmid_max 范围内均无可用VMID"
+    exit 1
+fi
+log "旧LXC容器ID为: $old_container_id"
+log "新LXC容器ID为: $new_container_id"
 
 # 下载 OpenWrt 最新版本
 log "正在下载 OpenWrt 最新版本..."
@@ -166,7 +219,7 @@ pct create $new_container_id $template --rootfs $rootfs --ostype $ostype --hostn
 check_result $? "创建新容器失败。"
 pct start $new_container_id
 check_result $? "启动新容器失败。"
-sleep 10
+sleep 3
 
 # 将备份推送至新容器并还原备份
 if [ "$backup_enabled" == "1" ]; then
@@ -175,7 +228,7 @@ if [ "$backup_enabled" == "1" ]; then
     check_result $? "将备份推送到新容器失败。"
     pct exec $new_container_id -- sysupgrade -r $backup_file
     check_result $? "在新容器中还原备份失败。"
-    sleep 5
+    sleep 3
 fi
 
 # 启动 OpenClash
@@ -204,5 +257,4 @@ log "正在销毁旧容器..."
 pct destroy $old_container_id --purge
 check_result $? "销毁旧容器失败。"
 
-# 记录脚本执行完成
 log "脚本执行完成。"
