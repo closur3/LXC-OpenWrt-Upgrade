@@ -196,15 +196,21 @@ log "新LXC容器ID为: $new_container_id"
 # 下载 OpenWrt 最新版本
 log "正在下载 OpenWrt 最新版本..."
 wget_output=$(wget -N "$download_url" -P /var/lib/vz/template/cache/ 2>&1 || true)
+
 if echo "$wget_output" | grep -q "Omitting download"; then
-    while :; do
-        read -t 30 -p "固件似乎没有更新。是否继续？ [y/n]: " choice
-        case "$choice" in
-            y|Y) break ;;
-            n|N) log "脚本执行中止。"; exit 0 ;;
-            *) echo "请输入 y 或 n。" ;;
-        esac
-    done
+    if [[ -t 0 && -t 1 ]]; then
+        while :; do
+            read -t 30 -p "固件没有更新。是否强制继续？ [y/n]: " choice
+            case "$choice" in
+                y|Y) break ;;
+                n|N) log "脚本执行中止。"; exit 0 ;;
+                *) echo "请输入 y 或 n。" ;;
+            esac
+        done
+    else
+        log "固件没有更新，在非交互式环境中自动跳过更新。"
+        exit 0
+    fi
 else
     log "下载成功"
 fi
