@@ -21,6 +21,51 @@ check_command() {
     command -v "$1" >/dev/null 2>&1 || { log "缺少必要命令: $1"; exit 1; }
 }
 
+# 从运行中的容器读取配置参数
+get_container_config() {
+    local vmid=$1
+    local config_file="/etc/pve/lxc/${vmid}.conf"
+    
+    if [ ! -f "$config_file" ]; then
+        log "错误：无法找到容器 $vmid 的配置文件"
+        exit 1
+    fi
+
+    local current_config
+    current_config=$(awk '/^\[.*\]/{exit} {print}' "$config_file")
+    
+    # 读取配置参数
+    ostype=$(echo "$current_config" | grep "^ostype:" | head -1 | cut -d: -f2 | xargs || echo "unmanaged")
+    arch=$(echo "$current_config" | grep "^arch:" | head -1 | cut -d: -f2 | xargs || echo "amd64")
+    cores=$(echo "$current_config" | grep "^cores:" | head -1 | cut -d: -f2 | xargs || echo "2")
+    memory=$(echo "$current_config" | grep "^memory:" | head -1 | cut -d: -f2 | xargs || echo "1024")
+    swap=$(echo "$current_config" | grep "^swap:" | head -1 | cut -d: -f2 | xargs || echo "0")
+    onboot=$(echo "$current_config" | grep "^onboot:" | head -1 | cut -d: -f2 | xargs || echo "1")
+    startup=$(echo "$current_config" | grep "^startup:" | head -1 | cut -d: -f2- | xargs || echo "order=2")
+    features=$(echo "$current_config" | grep "^features:" | head -1 | cut -d: -f2- | xargs || echo "nesting=1")
+    
+    # 读取网络接口
+    network_configs=""
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^net[0-9]+: ]]; then
+            net_key=$(echo "$line" | cut -d: -f1)
+            net_value=$(echo "$line" | cut -d: -f2- | xargs)
+            # 移除 hwaddr 参数，让新容器自动生成新的 MAC 地址
+            net_value_clean=$(echo "$net_value" | sed 's/,hwaddr=[^,]*//g' | sed 's/hwaddr=[^,]*,//g' | sed 's/hwaddr=[^,]*$//g')
+            if [ -z "$network_configs" ]; then
+                network_configs="--${net_key} \"${net_value_clean}\""
+            else
+                network_configs="$network_configs --${net_key} \"${net_value_clean}\""
+            fi
+        fi
+    done <<< "$current_config"
+    
+    # 如果没有找到网络配置，使用默认值
+    if [ -z "$network_configs" ]; then
+        network_configs="--net0 \"name=eth0,bridge=vmbr0,firewall=1\""
+    fi
+}
+
 # root 权限检测
 [ "$(id -u)" -eq 0 ] || { log "请使用 root 权限运行此脚本"; exit 1; }
 
@@ -40,7 +85,6 @@ vmid_max=999
 
 # 备份设置
 backup_enabled="1"
-openclash_enabled="1"
 
 # 容器设置
 backup_file="/tmp/backup.tar.gz"
@@ -49,20 +93,11 @@ download_url="https://github.com/closur3/OpenWrt-Mainline/releases/latest/downlo
 # 容器参数
 template="local:vztmpl/openwrt-x86-64-generic-rootfs.tar.gz"
 rootfs="local-lvm:1"
-ostype="unmanaged"
 hostname="OpenWrt"
-arch="amd64"
-cores="2"
-memory="1024"
-swap="0"
-onboot="yes"
-startup="order=2"
-features="nesting=1"
-net0="name=eth0,bridge=vmbr0,firewall=1"
 
 # 网络检测目标
 network_check_host="www.qq.com"
-network_check_count=3
+network_check_count=5
 EOF
     log "检测到首次运行脚本，请先配置 $INI_FILE"
     exit 1
@@ -71,26 +106,11 @@ fi
 # 读取配置
 source "$INI_FILE"
 
-# 参数解析
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        -off)
-            backup_enabled="0"
-            openclash_enabled="0"
-            ;;
-        *)
-            log "未知选项：$1"
-            exit 1
-            ;;
-    esac
-    shift
-done
-
 # 网络连通性检测
 check_network_connectivity() {
     local target="${network_check_host:-www.qq.com}"
-    local ping_count="${network_check_count:-3}"
-    ping -q -c "$ping_count" "$target" >/dev/null
+    local ping_count="${network_check_count:-5}"
+    ping -4 -q -c "$ping_count" "$target" >/dev/null
 }
 
 # 获取正在运行的容器数量
@@ -107,33 +127,34 @@ get_running_vmid() {
 
 log "开始执行脚本..."
 
-# 备份与 OpenClash 状态输出
+# 备份状态输出
 case "$backup_enabled" in
-    0) log "备份：已禁用"; openclash_enabled="0" ;;
+    0) log "备份：已禁用" ;;
     1) log "备份：已启用" ;;
-    *) log "备份选项未知，已关闭"; backup_enabled="0"; openclash_enabled="0" ;;
+    *) log "备份选项未知，已关闭"; backup_enabled="0" ;;
 esac
 
-case "$openclash_enabled" in
-    0) log "OpenClash：已禁用" ;;
-    1) log "OpenClash：已启用" ;;
-    *) log "OpenClash选项未知，已关闭"; openclash_enabled="0" ;;
-esac
 
-running_container_count=$(get_running_container_count "$hostname")
+# 首先从配置文件读取 hostname，如果没有则使用默认值
+config_hostname="${hostname:-OpenWrt}"
+
+running_container_count=$(get_running_container_count "$config_hostname")
 if [ "$running_container_count" -eq 0 ]; then
-    log "未发现正在运行的 $hostname 容器，请确保至少一个容器正在运行。"
+    log "未发现正在运行的 $config_hostname 容器，请确保至少一个容器正在运行。"
     exit 1
 elif [ "$running_container_count" -gt 1 ]; then
-    log "有多个 $hostname 容器正在运行，请确保只有一个容器正在运行。"
+    log "有多个 $config_hostname 容器正在运行，请确保只有一个容器正在运行。"
     exit 1
 fi
 
-running_vmid=$(get_running_vmid "$hostname")
+running_vmid=$(get_running_vmid "$config_hostname")
 if [ -z "$running_vmid" ]; then
     log "错误：无法确定运行中的 VMID。"
     exit 1
 fi
+
+# 从运行中的容器读取配置
+get_container_config "$running_vmid"
 
 # 自动分配新容器ID，确保与KVM不在同一百段并取最小空闲段
 lxc_vmids=($(pct list | awk 'NR>1 {print $1}'))
@@ -228,22 +249,17 @@ fi
 
 # 预创建新容器
 log "预创建新容器..."
-pct create $new_container_id "$template" \
-    --rootfs "$rootfs" --ostype "$ostype" --hostname "$hostname" --arch "$arch" \
-    --cores "$cores" --memory "$memory" --swap "$swap" --onboot "$onboot" \
-    --startup "$startup" --features "$features" --net0 "$net0"
+eval "pct create $new_container_id \"$template\" \
+    --rootfs \"$rootfs\" --ostype \"$ostype\" --hostname \"$hostname\" --arch \"$arch\" \
+    --cores \"$cores\" --memory \"$memory\" --swap \"$swap\" --onboot \"$onboot\" \
+    --startup \"$startup\" --features \"$features\" $network_configs"
 check_result $? "创建新容器失败。"
-
-# 停止旧容器
-log "停止旧容器..."
-pct stop $old_container_id
-check_result $? "停止旧容器失败。"
 
 # 启动新容器
 log "启动新容器..."
 pct start $new_container_id
 check_result $? "启动新容器失败。"
-sleep 3
+sleep 5
 
 # 还原备份
 if [ "$backup_enabled" = "1" ]; then
@@ -252,20 +268,22 @@ if [ "$backup_enabled" = "1" ]; then
     check_result $? "将备份推送到新容器失败。"
     pct exec $new_container_id -- sysupgrade -r "$backup_file"
     check_result $? "在新容器中还原备份失败。"
-    sleep 3
 fi
 
-# 启动 OpenClash
-if [ "$openclash_enabled" = "1" ]; then
-    log "在新容器中启动 OpenClash..."
-    pct exec $new_container_id -- uci set openclash.config.enable='1'
-    pct exec $new_container_id -- uci commit openclash
-    pct exec $new_container_id -- /etc/init.d/openclash start
-    check_result $? "在新容器中启动 OpenClash 失败。"
-fi
+# 重启容器
+log "重启新容器以应用所有更改..."
+pct exec $new_container_id -- reboot
+
+
+# 停止旧容器
+log "停止旧容器..."
+pct stop $old_container_id
+check_result $? "停止旧容器失败。"
 
 # 网络连通性测试
 if [ "$backup_enabled" = "1" ]; then
+    log "等待60秒后进行连通性测试..."
+    sleep 60
     log "当前网络检测目标: $network_check_host"
     if ! check_network_connectivity; then
         while :; do
