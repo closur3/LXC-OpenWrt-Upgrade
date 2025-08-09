@@ -268,17 +268,16 @@ if [ "$backup_enabled" = "1" ]; then
     check_result $? "将备份推送到新容器失败。"
     pct exec $new_container_id -- sysupgrade -r "$backup_file"
     check_result $? "在新容器中还原备份失败。"
+
+    # 重启新容器
+    log "重启新容器以应用所有更改..."
+    pct exec $new_container_id -- reboot
+
+    # 停止旧容器
+    log "停止旧容器..."
+    pct stop $old_container_id
+    check_result $? "停止旧容器失败。"
 fi
-
-# 重启容器
-log "重启新容器以应用所有更改..."
-pct exec $new_container_id -- reboot
-
-
-# 停止旧容器
-log "停止旧容器..."
-pct stop $old_container_id
-check_result $? "停止旧容器失败。"
 
 # 网络连通性测试
 if [ "$backup_enabled" = "1" ]; then
