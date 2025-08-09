@@ -14,11 +14,19 @@ backup_enabled="1"
 backup_file="/tmp/backup.tar.gz"
 download_url="https://github.com/closur3/OpenWrt-Mainline/releases/latest/download/openwrt-x86-64-generic-rootfs.tar.gz"
 
-# 容器参数
+# 容器参数（如填写则使用，否则自动读取容器配置）
 template="local:vztmpl/openwrt-x86-64-generic-rootfs.tar.gz"
 rootfs="local-lvm:1"
 hostname="OpenWrt"
-
+ostype=""
+arch=""
+cores=""
+memory=""
+swap=""
+onboot=""
+startup=""
+features=""
+network_configs=""
 # 网络检测目标
 network_check_host="www.qq.com"
 network_check_count=5
@@ -43,11 +51,10 @@ check_command() {
     command -v "$1" >/dev/null 2>&1 || { log "缺少必要命令: $1"; exit 1; }
 }
 
-# 从运行中的容器读取配置参数
+# 读取配置参数
 get_container_config() {
     local vmid=$1
     local config_file="/etc/pve/lxc/${vmid}.conf"
-    
     if [ ! -f "$config_file" ]; then
         log "错误：无法找到容器 $vmid 的配置文件"
         exit 1
@@ -55,36 +62,49 @@ get_container_config() {
 
     local current_config
     current_config=$(awk '/^\[.*\]/{exit} {print}' "$config_file")
-    
-    # 读取配置参数
-    ostype=$(echo "$current_config" | grep "^ostype:" | head -1 | cut -d: -f2 | xargs || echo "unmanaged")
-    arch=$(echo "$current_config" | grep "^arch:" | head -1 | cut -d: -f2 | xargs || echo "amd64")
-    cores=$(echo "$current_config" | grep "^cores:" | head -1 | cut -d: -f2 | xargs || echo "2")
-    memory=$(echo "$current_config" | grep "^memory:" | head -1 | cut -d: -f2 | xargs || echo "1024")
-    swap=$(echo "$current_config" | grep "^swap:" | head -1 | cut -d: -f2 | xargs || echo "0")
-    onboot=$(echo "$current_config" | grep "^onboot:" | head -1 | cut -d: -f2 | xargs || echo "1")
-    startup=$(echo "$current_config" | grep "^startup:" | head -1 | cut -d: -f2- | xargs || echo "order=2")
-    features=$(echo "$current_config" | grep "^features:" | head -1 | cut -d: -f2- | xargs || echo "nesting=1")
-    
-    # 读取网络接口
-    network_configs=""
-    while IFS= read -r line; do
-        if [[ "$line" =~ ^net[0-9]+: ]]; then
-            net_key=$(echo "$line" | cut -d: -f1)
-            net_value=$(echo "$line" | cut -d: -f2- | xargs)
-            # 移除 hwaddr 参数，让新容器自动生成新的 MAC 地址
-            net_value_clean=$(echo "$net_value" | sed 's/,hwaddr=[^,]*//g' | sed 's/hwaddr=[^,]*,//g' | sed 's/hwaddr=[^,]*$//g')
-            if [ -z "$network_configs" ]; then
-                network_configs="--${net_key} \"${net_value_clean}\""
-            else
-                network_configs="$network_configs --${net_key} \"${net_value_clean}\""
-            fi
-        fi
-    done <<< "$current_config"
-    
-    # 如果没有找到网络配置，使用默认值
+
+    # 读取容器参数（只有为空时才读取）
+    if [ -z "$ostype" ]; then
+        ostype=$(echo "$current_config" | grep "^ostype:" | head -1 | cut -d: -f2 | xargs)
+    fi
+    if [ -z "$arch" ]; then
+        arch=$(echo "$current_config" | grep "^arch:" | head -1 | cut -d: -f2 | xargs)
+    fi
+    if [ -z "$cores" ]; then
+        cores=$(echo "$current_config" | grep "^cores:" | head -1 | cut -d: -f2 | xargs)
+    fi
+    if [ -z "$memory" ]; then
+        memory=$(echo "$current_config" | grep "^memory:" | head -1 | cut -d: -f2 | xargs)
+    fi
+    if [ -z "$swap" ]; then
+        swap=$(echo "$current_config" | grep "^swap:" | head -1 | cut -d: -f2 | xargs)
+    fi
+    if [ -z "$onboot" ]; then
+        onboot=$(echo "$current_config" | grep "^onboot:" | head -1 | cut -d: -f2 | xargs)
+    fi
+    if [ -z "$startup" ]; then
+        startup=$(echo "$current_config" | grep "^startup:" | head -1 | cut -d: -f2- | xargs)
+    fi
+    if [ -z "$features" ]; then
+        features=$(echo "$current_config" | grep "^features:" | head -1 | cut -d: -f2- | xargs)
+    fi
+
+    # 读取网络接口（只有为空时才读取）
     if [ -z "$network_configs" ]; then
-        network_configs="--net0 \"name=eth0,bridge=vmbr0,firewall=1\""
+        # 读取网络接口
+        network_configs=""
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^net[0-9]+: ]]; then
+                net_key=$(echo "$line" | cut -d: -f1)
+                net_value=$(echo "$line" | cut -d: -f2- | xargs)
+                net_value_clean=$(echo "$net_value" | sed 's/,hwaddr=[^,]*//g' | sed 's/hwaddr=[^,]*,//g' | sed 's/hwaddr=[^,]*$//g')
+                if [ -z "$network_configs" ]; then
+                    network_configs="--${net_key} \"${net_value_clean}\""
+                else
+                    network_configs="$network_configs --${net_key} \"${net_value_clean}\""
+                fi
+            fi
+        done <<< "$current_config"
     fi
 }
 
@@ -124,7 +144,6 @@ case "$backup_enabled" in
     *) log "备份选项未知，已关闭"; backup_enabled="0" ;;
 esac
 
-
 # 首先从配置项读取 hostname，如果没有则使用默认值
 config_hostname="${hostname:-OpenWrt}"
 
@@ -143,16 +162,14 @@ if [ -z "$running_vmid" ]; then
     exit 1
 fi
 
-# 从运行中的容器读取配置
+# 获取配置（自动填充空项）
 get_container_config "$running_vmid"
 
-# 自动分配新容器ID，确保与KVM不在同一百段并取最小空闲段
 lxc_vmids=($(pct list | awk 'NR>1 {print $1}'))
 kvm_vmids=($(qm list | awk 'NR>1 {print $1}'))
 all_vmids=($(printf "%s\n" "${lxc_vmids[@]}" "${kvm_vmids[@]}" | sort -n | uniq))
 
 old_container_id="$running_vmid"
-
 vmid_min=${vmid_min:-100}
 vmid_max=${vmid_max:-999}
 seg_min=$((vmid_min / 100))
@@ -262,7 +279,6 @@ if [ "$backup_enabled" = "1" ]; then
     # 重启新容器
     log "重启新容器以应用所有更改..."
     pct exec $new_container_id -- reboot
-
 fi
 
 # 停止旧容器
