@@ -273,11 +273,12 @@ if [ "$backup_enabled" = "1" ]; then
     log "重启新容器以应用所有更改..."
     pct exec $new_container_id -- reboot
 
-    # 停止旧容器
-    log "停止旧容器..."
-    pct stop $old_container_id
-    check_result $? "停止旧容器失败。"
 fi
+
+# 停止旧容器
+log "停止旧容器..."
+pct stop $old_container_id
+check_result $? "停止旧容器失败。"
 
 # 网络连通性测试
 if [ "$backup_enabled" = "1" ]; then
