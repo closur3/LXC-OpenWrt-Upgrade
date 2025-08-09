@@ -2,6 +2,28 @@
 set -euo pipefail
 export LC_ALL=C
 
+############################# 配置项 #############################
+# VMID分配范围
+vmid_min=100
+vmid_max=999
+
+# 备份设置
+backup_enabled="1"
+
+# 容器设置
+backup_file="/tmp/backup.tar.gz"
+download_url="https://github.com/closur3/OpenWrt-Mainline/releases/latest/download/openwrt-x86-64-generic-rootfs.tar.gz"
+
+# 容器参数
+template="local:vztmpl/openwrt-x86-64-generic-rootfs.tar.gz"
+rootfs="local-lvm:1"
+hostname="OpenWrt"
+
+# 网络检测目标
+network_check_host="www.qq.com"
+network_check_count=5
+############################# 配置项 #############################
+
 # 日志函数
 log() {
     echo "[$(basename "$0") $(date +'%Y-%m-%d %H:%M:%S')] $*"
@@ -74,38 +96,6 @@ for cmd in pct qm wget awk grep sort uniq ping; do
     check_command "$cmd"
 done
 
-INI_FILE="$(dirname "$0")/lxc.sh.ini"
-if [ ! -f "$INI_FILE" ]; then
-    cat > "$INI_FILE" <<EOF
-# lxc.sh 配置文件
-
-# VMID分配范围
-vmid_min=100
-vmid_max=999
-
-# 备份设置
-backup_enabled="1"
-
-# 容器设置
-backup_file="/tmp/backup.tar.gz"
-download_url="https://github.com/closur3/OpenWrt-Mainline/releases/latest/download/openwrt-x86-64-generic-rootfs.tar.gz"
-
-# 容器参数
-template="local:vztmpl/openwrt-x86-64-generic-rootfs.tar.gz"
-rootfs="local-lvm:1"
-hostname="OpenWrt"
-
-# 网络检测目标
-network_check_host="www.qq.com"
-network_check_count=5
-EOF
-    log "检测到首次运行脚本，请先配置 $INI_FILE"
-    exit 1
-fi
-
-# 读取配置
-source "$INI_FILE"
-
 # 网络连通性检测
 check_network_connectivity() {
     local target="${network_check_host:-www.qq.com}"
@@ -135,7 +125,7 @@ case "$backup_enabled" in
 esac
 
 
-# 首先从配置文件读取 hostname，如果没有则使用默认值
+# 首先从配置项读取 hostname，如果没有则使用默认值
 config_hostname="${hostname:-OpenWrt}"
 
 running_container_count=$(get_running_container_count "$config_hostname")
