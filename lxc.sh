@@ -116,6 +116,20 @@ for cmd in pct qm wget awk grep sort uniq ping; do
     check_command "$cmd"
 done
 
+# 参数解析
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -off)
+            backup_enabled="0"
+            ;;
+        *)
+            log "未知选项：$1"
+            exit 1
+            ;;
+    esac
+    shift
+done
+
 # 网络连通性检测
 check_network_connectivity() {
     local target="${network_check_host:-www.qq.com}"
