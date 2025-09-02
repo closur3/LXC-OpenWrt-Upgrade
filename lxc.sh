@@ -273,7 +273,8 @@ log "预创建新容器..."
 eval "pct create $new_container_id \"$template\" \
     --rootfs \"$rootfs\" --ostype \"$ostype\" --hostname \"$hostname\" --arch \"$arch\" \
     --cores \"$cores\" --memory \"$memory\" --swap \"$swap\" --onboot \"$onboot\" \
-    --startup \"$startup\" --features \"$features\" $network_configs"
+    --startup \"$startup\" --features \"$features\" $network_configs \
+    --unprivileged 0"
 check_result $? "创建新容器失败。"
 
 # 启动新容器
