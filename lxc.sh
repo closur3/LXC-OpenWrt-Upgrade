@@ -58,19 +58,20 @@ rollback() {
     exit 1
 }
 
-# 智能轮询等待容器就绪
+# 智能轮询等待容器就绪 (支持自定义探测命令)
 wait_container_ready() {
     local vmid=$1
     local max_retries=${2:-30}
+    local check_cmd=${3:-"true"} # 默认执行 true，也可传入更高阶的检查命令
     local count=0
     
-    while ! pct exec "$vmid" -- true >/dev/null 2>&1; do
+    while ! pct exec "$vmid" -- $check_cmd >/dev/null 2>&1; do
         count=$((count + 1))
         [ "$count" -ge "$max_retries" ] && return 1
         sleep 1
     done
     
-    log "容器 $vmid 内核与系统已就绪，耗时约 $count 秒。"
+    log "容器 $vmid 系统核心组件已就绪，耗时约 $count 秒。"
     return 0
 }
 
@@ -213,7 +214,6 @@ allocate_new_vmid() {
         fi
     done
 
-    # 优先在没有 KVM 的百位号段查找，找不到则全局查找
     for search_mode in "strict" "fallback"; do
         for seg in $(seq $seg_min $seg_max); do
             if [ "$search_mode" == "strict" ] && [ -n "${kvm_hundred_flag[$seg]+x}" ]; then continue; fi
@@ -303,7 +303,8 @@ provision_and_start_new() {
     check_result $? "启动新容器失败。"
 
     log "正在主动轮询等待新容器系统初始化..."
-    if ! wait_container_ready "$NEW_VMID" 15; then
+    # 核心组件检查：ubus call system board
+    if ! wait_container_ready "$NEW_VMID" 15 "ubus call system board"; then
         log "严重错误：新容器启动后长时间无响应，无法继续执行还原。"
         rollback
     fi
@@ -319,30 +320,46 @@ perform_restore() {
         
         rm -f "$HOST_BACKUP_FILE"
 
-        log "重启新容器以应用所有更改..."
+        log "通过容器原生指令重启新容器以应用所有更改..."
         pct exec "$NEW_VMID" -- reboot
         
-        log "正在等待新容器重启并重新加载系统配置..."
-        if ! wait_container_ready "$NEW_VMID" 30; then
+        # ================= 极客级两段式轮询 =================
+        log "正在监控新容器下线状态..."
+        local offline_count=0
+        # 阶段 1：不断发送命令，直到命令执行失败（证明容器已断开连接，真正开始重启）
+        while pct exec "$NEW_VMID" -- true >/dev/null 2>&1; do
+            offline_count=$((offline_count + 1))
+            if [ "$offline_count" -ge 15 ]; then
+                log "警告：容器迟迟未下线，可能重启卡死。"
+                break
+            fi
+            sleep 1
+        done
+        log "检测到容器已下线，正在等待重新加载系统配置..."
+        
+        # 阶段 2：复用我们之前的智能轮询，等待 ubus 核心组件重新拉起
+        if ! wait_container_ready "$NEW_VMID" 30 "ubus call system board"; then
             log "严重错误：新容器还原配置并重启后无响应。"
             rollback
         fi
+        # ====================================================
     fi
 }
 
 verify_network_and_cleanup() {
     if [ "$backup_enabled" = "1" ] && [ "$IS_NEW_INSTALL" -eq 0 ]; then
         log "正在等待代理插件启动并进行海外连通性测试 (目标: $network_check_url)..."
-        local max_retries=45
+        local max_retries=30
         local retry_count=0
         local network_up=0
 
         while [ $retry_count -lt $max_retries ]; do
-            if pct exec "$NEW_VMID" -- wget -q -O /dev/null -T 2 "$network_check_url" >/dev/null 2>&1; then
+            # 设置极短的 1 秒超时时间，避免叠加导致的 6 分钟延迟漏洞
+            if pct exec "$NEW_VMID" -- wget -q -O /dev/null -T 1 "$network_check_url" >/dev/null 2>&1; then
                 network_up=1
                 log "网络已连通！容器海外访问恢复，耗时约 $((retry_count * 2)) 秒。"
                 break
-            elif curl -s -o /dev/null -m 2 "$network_check_url" >/dev/null 2>&1; then
+            elif curl -s -o /dev/null -m 1 "$network_check_url" >/dev/null 2>&1; then
                 network_up=1
                 log "网络已连通！宿主机海外访问恢复，耗时约 $((retry_count * 2)) 秒。"
                 break
