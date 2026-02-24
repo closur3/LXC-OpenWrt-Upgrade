@@ -1,4 +1,4 @@
 # LXC-OpenWrt-Upgrade
 ```
-wget -N https://raw.githubusercontent.com/closur3/LXC-OpenWrt-Upgrade/main/lxc.sh
+wget -O lxc.sh https://raw.githubusercontent.com/closur3/LXC-OpenWrt-Upgrade/main/lxc.sh && chmod +x lxc.sh
 ```
