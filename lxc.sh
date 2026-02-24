@@ -54,7 +54,7 @@ check_command() {
     command -v "$1" >/dev/null 2>&1 || { log "缺少必要命令: $1"; exit 1; }
 }
 
-# 读取配置参数
+# 读取配置参数 (已修复 grep 找不到参数时的致命闪退 BUG)
 get_container_config() {
     local vmid=$1
     local config_file="/etc/pve/lxc/${vmid}.conf"
@@ -66,14 +66,15 @@ get_container_config() {
     local current_config
     current_config=$(awk '/^\[.*\]/{exit} {print}' "$config_file")
 
-    if [ -z "$ostype" ]; then ostype=$(echo "$current_config" | grep "^ostype:" | head -1 | cut -d: -f2 | xargs); fi
-    if [ -z "$arch" ]; then arch=$(echo "$current_config" | grep "^arch:" | head -1 | cut -d: -f2 | xargs); fi
-    if [ -z "$cores" ]; then cores=$(echo "$current_config" | grep "^cores:" | head -1 | cut -d: -f2 | xargs); fi
-    if [ -z "$memory" ]; then memory=$(echo "$current_config" | grep "^memory:" | head -1 | cut -d: -f2 | xargs); fi
-    if [ -z "$swap" ]; then swap=$(echo "$current_config" | grep "^swap:" | head -1 | cut -d: -f2 | xargs); fi
-    if [ -z "$onboot" ]; then onboot=$(echo "$current_config" | grep "^onboot:" | head -1 | cut -d: -f2 | xargs); fi
-    if [ -z "$startup" ]; then startup=$(echo "$current_config" | grep "^startup:" | head -1 | cut -d: -f2- | xargs); fi
-    if [ -z "$features" ]; then features=$(echo "$current_config" | grep "^features:" | head -1 | cut -d: -f2- | xargs); fi
+    # 加入 || true 防止 grep 返回 1 触发 set -e 导致脚本静默闪退
+    if [ -z "$ostype" ]; then ostype=$(echo "$current_config" | grep "^ostype:" | head -1 | cut -d: -f2 | xargs || true); fi
+    if [ -z "$arch" ]; then arch=$(echo "$current_config" | grep "^arch:" | head -1 | cut -d: -f2 | xargs || true); fi
+    if [ -z "$cores" ]; then cores=$(echo "$current_config" | grep "^cores:" | head -1 | cut -d: -f2 | xargs || true); fi
+    if [ -z "$memory" ]; then memory=$(echo "$current_config" | grep "^memory:" | head -1 | cut -d: -f2 | xargs || true); fi
+    if [ -z "$swap" ]; then swap=$(echo "$current_config" | grep "^swap:" | head -1 | cut -d: -f2 | xargs || true); fi
+    if [ -z "$onboot" ]; then onboot=$(echo "$current_config" | grep "^onboot:" | head -1 | cut -d: -f2 | xargs || true); fi
+    if [ -z "$startup" ]; then startup=$(echo "$current_config" | grep "^startup:" | head -1 | cut -d: -f2- | xargs || true); fi
+    if [ -z "$features" ]; then features=$(echo "$current_config" | grep "^features:" | head -1 | cut -d: -f2- | xargs || true); fi
 
     if [ -z "$network_configs" ]; then
         network_configs=""
@@ -91,7 +92,7 @@ get_container_config() {
 # root 权限检测
 [ "$(id -u)" -eq 0 ] || { log "请使用 root 权限运行此脚本"; exit 1; }
 
-# 检查依赖（已加入 curl 用于宿主机代理检测）
+# 检查依赖
 for cmd in pct qm wget curl awk grep sort uniq md5sum cat rm chmod; do
     check_command "$cmd"
 done
@@ -101,23 +102,25 @@ check_update() {
     log "正在检查脚本更新..."
     local temp_file="/tmp/lxc_update_remote.sh"
     
-    # 使用 wget 静默下载并设置 5 秒超时
     if wget -q -T 5 -O "$temp_file" "$SCRIPT_URL"; then
-        local local_md5
-        local remote_md5
-        local_md5=$(md5sum "$0" | awk '{print $1}')
-        remote_md5=$(md5sum "$temp_file" | awk '{print $1}')
-        
-        if [ "$local_md5" != "$remote_md5" ]; then
-            log "发现新版本脚本！正在自动覆盖更新..."
-            cat "$temp_file" > "$0"
-            chmod +x "$0"
-            rm -f "$temp_file"
-            log "更新完成！正在应用新版本重启脚本..."
-            # 替换当前进程，并传递所有原有参数
-            exec "$0" "$@"
+        if grep -q "^#!/bin/bash" "$temp_file"; then
+            local local_md5
+            local remote_md5
+            local_md5=$(md5sum "$0" | awk '{print $1}')
+            remote_md5=$(md5sum "$temp_file" | awk '{print $1}')
+            
+            if [ "$local_md5" != "$remote_md5" ]; then
+                log "发现新版本脚本！正在自动覆盖更新..."
+                cat "$temp_file" > "$0"
+                chmod +x "$0"
+                rm -f "$temp_file"
+                log "更新完成！正在应用新版本重启脚本..."
+                exec "$0" "$@"
+            else
+                log "当前已是最新版本。"
+            fi
         else
-            log "当前已是最新版本。"
+            log "下载的文件验证失败，跳过更新。"
         fi
         rm -f "$temp_file"
     else
@@ -125,7 +128,7 @@ check_update() {
     fi
 }
 
-# 触发更新检查（带上启动参数以防重启丢失参数）
+# 触发更新检查
 check_update "$@"
 
 # 参数解析
@@ -147,8 +150,19 @@ esac
 
 config_hostname="${hostname:-OpenWrt}"
 
-existing_vmids=$(pct list | awk -v container="$config_hostname" 'NR>1 && $3 == container {print $1}')
-container_count=$(echo "$existing_vmids" | awk 'NF' | wc -l)
+# ================= 安全提取 LXC 容器信息 =================
+set +e +o pipefail
+pct_output=$(pct list 2>&1)
+set -e -o pipefail
+
+existing_vmids=$(echo "$pct_output" | awk -v container="$config_hostname" 'NR>1 && ($3 == container || $4 == container) {print $1}' || true)
+
+if [ -z "$existing_vmids" ]; then
+    container_count=0
+else
+    container_count=$(echo "$existing_vmids" | wc -w)
+fi
+# =========================================================
 
 is_new_install=0
 old_container_id=""
@@ -177,7 +191,7 @@ elif [ "$container_count" -gt 1 ]; then
     log "有多个名为 $config_hostname 的容器，请确保环境中只有一个目标容器。"
     exit 1
 else
-    old_container_id=$(echo "$existing_vmids" | head -n 1)
+    old_container_id=$(echo "$existing_vmids" | awk 'NR==1 {print $1}')
     if ! pct status "$old_container_id" | grep -q "running"; then
         log "容器 $old_container_id 未运行。请先启动该容器以确保可以进行备份和升级。"
         exit 1
@@ -199,9 +213,15 @@ else
     host_backup_file="/tmp/openwrt_backup_${old_container_id}.tar.gz"
 fi
 
-lxc_vmids=($(pct list | awk 'NR>1 {print $1}'))
-kvm_vmids=($(qm list | awk 'NR>1 {print $1}'))
-all_vmids=($(printf "%s\n" "${lxc_vmids[@]:-}" "${kvm_vmids[@]:-}" | sort -n | uniq))
+# ================= 安全提取所有已用 VMID =================
+set +e +o pipefail
+qm_output=$(qm list 2>/dev/null)
+set -e -o pipefail
+
+lxc_vmids=($(echo "$pct_output" | awk 'NR>1 {print $1}' || true))
+kvm_vmids=($(echo "$qm_output" | awk 'NR>1 {print $1}' || true))
+all_vmids=($(printf "%s\n" "${lxc_vmids[@]:-}" "${kvm_vmids[@]:-}" | sort -n | uniq || true))
+# =========================================================
 
 vmid_min=${vmid_min:-100}
 vmid_max=${vmid_max:-999}
@@ -278,7 +298,6 @@ else
     log "下载成功"
 fi
 
-# 升级模式下的备份与旧容器启停逻辑
 if [ "$is_new_install" -eq 0 ]; then
     if [ "$backup_enabled" = "1" ]; then
         log "创建备份并从旧容器中拉取备份..."
@@ -293,7 +312,6 @@ if [ "$is_new_install" -eq 0 ]; then
     check_result $? "停止旧容器失败。"
 fi
 
-# 使用数组动态构建 pct create 命令参数（安全可靠）
 log "预创建新容器..."
 create_args=(
     "$new_container_id" "$template"
@@ -311,7 +329,6 @@ create_args=(
 [ -n "$startup" ] && create_args+=(--startup "$startup")
 [ -n "$features" ] && create_args+=(--features "$features")
 
-# 将网络配置字符串按空格拆分并追加到数组中
 if [ -n "$network_configs" ]; then
     read -ra net_arr <<< "$network_configs"
     create_args+=("${net_arr[@]}")
@@ -320,9 +337,8 @@ fi
 pct create "${create_args[@]}"
 check_result $? "创建新容器失败。"
 
-# 修改：如果是全新安装，创建完毕后直接退出，不启动容器
 if [ "$is_new_install" -eq 1 ]; then
-    log "全新容器已成功创建并启动，请进入 Proxmox 面板或使用终端进行后续配置。"
+    log "全新容器已成功创建。默认未启动，请进入 Proxmox 面板或使用终端配置网络后再手动启动。"
     exit 0
 fi
 
@@ -331,7 +347,6 @@ pct start $new_container_id
 check_result $? "启动新容器失败。"
 sleep 3
 
-# 还原备份（升级模式）
 if [ "$backup_enabled" = "1" ]; then
     log "在新容器中还原备份..."
     pct push $new_container_id "$host_backup_file" "$backup_file"
@@ -339,30 +354,24 @@ if [ "$backup_enabled" = "1" ]; then
     pct exec $new_container_id -- sysupgrade -r "$backup_file"
     check_result $? "在新容器中还原备份失败。"
     
-    # 清理宿主机的临时备份文件
     rm -f "$host_backup_file"
 
     log "重启新容器以应用所有更改..."
     pct exec $new_container_id -- reboot
 fi
 
-# 轮询网络连通性测试 (应用层TCP测试)
 if [ "$backup_enabled" = "1" ] && [ "$is_new_install" -eq 0 ]; then
     log "正在等待代理插件启动并进行海外连通性测试 (目标: $network_check_url)..."
     
-    # 代理软件启动通常较慢，将最大重试次数增加到 30 次 (约 90 秒)
     max_retries=30  
     retry_count=0
     network_up=0
 
     while [ $retry_count -lt $max_retries ]; do
-        # 优先在容器内部发起 HTTP 请求，使用 OpenWrt 自带的 wget
         if pct exec $new_container_id -- wget -q -O /dev/null -T 3 "$network_check_url" >/dev/null 2>&1; then
             network_up=1
             log "网络已连通！容器海外访问恢复，耗时约 $((retry_count * 3)) 秒。"
             break
-            
-        # 备选：如果容器自身网络不走代理，但宿主机(PVE)的网关指向了OpenWrt，则使用宿主机的 curl 测试
         elif curl -s -o /dev/null -m 3 "$network_check_url" >/dev/null 2>&1; then
             network_up=1
             log "网络已连通！宿主机海外访问恢复，耗时约 $((retry_count * 3)) 秒。"
@@ -379,7 +388,7 @@ if [ "$backup_enabled" = "1" ] && [ "$is_new_install" -eq 0 ]; then
             case "$choice" in
                 y|Y) break ;;
                 n|N) 
-                    log "保留旧容器。你可以手动检查新容器的代理插件配置，或者重新启动旧容器。"
+                    log "保留旧容器。你可以手动检查新容器的代理配置，或者重新启动旧容器。"
                     exit 0 ;;
                 *) echo "请输入 y 或 n。" ;;
             esac
@@ -387,7 +396,6 @@ if [ "$backup_enabled" = "1" ] && [ "$is_new_install" -eq 0 ]; then
     fi
 fi
 
-# 销毁旧容器
 log "正在销毁旧容器 ($old_container_id)..."
 pct destroy $old_container_id --purge
 check_result $? "销毁旧容器失败。"
