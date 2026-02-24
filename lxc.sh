@@ -54,7 +54,26 @@ check_command() {
     command -v "$1" >/dev/null 2>&1 || { log "缺少必要命令: $1"; exit 1; }
 }
 
-# 读取配置参数 (已修复 grep 找不到参数时的致命闪退 BUG)
+# 智能轮询：探测容器系统是否就绪
+wait_container_ready() {
+    local vmid=$1
+    local max_retries=${2:-30} # 默认最多等 30 秒
+    local count=0
+    
+    # 不断尝试在容器内执行 true 命令，探测系统是否已启动并接受指令
+    while ! pct exec "$vmid" -- true >/dev/null 2>&1; do
+        count=$((count + 1))
+        if [ "$count" -ge "$max_retries" ]; then
+            return 1 # 超时返回失败
+        fi
+        sleep 1
+    done
+    
+    log "容器 $vmid 内核与系统已就绪，耗时约 $count 秒。"
+    return 0
+}
+
+# 读取配置参数
 get_container_config() {
     local vmid=$1
     local config_file="/etc/pve/lxc/${vmid}.conf"
@@ -66,7 +85,6 @@ get_container_config() {
     local current_config
     current_config=$(awk '/^\[.*\]/{exit} {print}' "$config_file")
 
-    # 加入 || true 防止 grep 返回 1 触发 set -e 导致脚本静默闪退
     if [ -z "$ostype" ]; then ostype=$(echo "$current_config" | grep "^ostype:" | head -1 | cut -d: -f2 | xargs || true); fi
     if [ -z "$arch" ]; then arch=$(echo "$current_config" | grep "^arch:" | head -1 | cut -d: -f2 | xargs || true); fi
     if [ -z "$cores" ]; then cores=$(echo "$current_config" | grep "^cores:" | head -1 | cut -d: -f2 | xargs || true); fi
@@ -345,7 +363,16 @@ fi
 log "启动新容器..."
 pct start $new_container_id
 check_result $? "启动新容器失败。"
-sleep 3
+
+# 智能轮询：替代原有的 sleep 3
+log "正在主动轮询等待新容器系统初始化..."
+if ! wait_container_ready "$new_container_id" 15; then
+    log "严重错误：新容器启动后长时间无响应，无法继续执行还原。"
+    log "正在启动故障保护：关闭新容器，回滚启动旧容器..."
+    pct stop "$new_container_id" || true
+    pct start "$old_container_id" || true
+    exit 1
+fi
 
 if [ "$backup_enabled" = "1" ]; then
     log "在新容器中还原备份..."
@@ -358,28 +385,39 @@ if [ "$backup_enabled" = "1" ]; then
 
     log "重启新容器以应用所有更改..."
     pct exec $new_container_id -- reboot
+    
+    # 智能轮询：等待系统重启完毕接管网络，替代盲目等待
+    log "正在等待新容器重启并重新加载系统配置..."
+    if ! wait_container_ready "$new_container_id" 30; then
+        log "严重错误：新容器还原配置并重启后无响应。"
+        log "正在启动故障保护：关闭新容器，回滚启动旧容器..."
+        pct stop "$new_container_id" || true
+        pct start "$old_container_id" || true
+        exit 1
+    fi
 fi
 
+# 应用层网络连通性轮询测试（间隔设为 2 秒，兼顾效率与防止过度发包）
 if [ "$backup_enabled" = "1" ] && [ "$is_new_install" -eq 0 ]; then
     log "正在等待代理插件启动并进行海外连通性测试 (目标: $network_check_url)..."
     
-    max_retries=30  
+    max_retries=45  # 最多等 90 秒
     retry_count=0
     network_up=0
 
     while [ $retry_count -lt $max_retries ]; do
-        if pct exec $new_container_id -- wget -q -O /dev/null -T 3 "$network_check_url" >/dev/null 2>&1; then
+        if pct exec $new_container_id -- wget -q -O /dev/null -T 2 "$network_check_url" >/dev/null 2>&1; then
             network_up=1
-            log "网络已连通！容器海外访问恢复，耗时约 $((retry_count * 3)) 秒。"
+            log "网络已连通！容器海外访问恢复，耗时约 $((retry_count * 2)) 秒。"
             break
-        elif curl -s -o /dev/null -m 3 "$network_check_url" >/dev/null 2>&1; then
+        elif curl -s -o /dev/null -m 2 "$network_check_url" >/dev/null 2>&1; then
             network_up=1
-            log "网络已连通！宿主机海外访问恢复，耗时约 $((retry_count * 3)) 秒。"
+            log "网络已连通！宿主机海外访问恢复，耗时约 $((retry_count * 2)) 秒。"
             break
         fi
 
         retry_count=$((retry_count + 1))
-        sleep 3
+        sleep 2
     done
 
     if [ "$network_up" -eq 0 ]; then
