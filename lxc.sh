@@ -320,15 +320,16 @@ fi
 pct create "${create_args[@]}"
 check_result $? "创建新容器失败。"
 
-log "启动新容器..."
-pct start $new_container_id
-check_result $? "启动新容器失败。"
-sleep 3
-
+# 修改：如果是全新安装，创建完毕后直接退出，不启动容器
 if [ "$is_new_install" -eq 1 ]; then
     log "全新容器已成功创建并启动，请进入 Proxmox 面板或使用终端进行后续配置。"
     exit 0
 fi
+
+log "启动新容器..."
+pct start $new_container_id
+check_result $? "启动新容器失败。"
+sleep 3
 
 # 还原备份（升级模式）
 if [ "$backup_enabled" = "1" ]; then
