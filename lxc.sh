@@ -320,29 +320,36 @@ perform_restore() {
         
         rm -f "$HOST_BACKUP_FILE"
 
-        log "通过容器原生指令重启新容器以应用所有更改..."
+        # ================= 终极精准轮询方案：内存标记法 =================
+        log "正在设置内存重置标记..."
+        # /tmp 在 OpenWrt 中是 tmpfs (内存盘)，系统一旦重启必定清空
+        pct exec "$NEW_VMID" -- touch /tmp/reboot_marker
+        
+        log "通过容器原生指令触发系统软重启..."
         pct exec "$NEW_VMID" -- reboot
         
-        # ================= 极客级两段式轮询 =================
-        log "正在监控新容器下线状态..."
+        log "正在监控内存标记，等待旧系统服务卸载..."
         local offline_count=0
-        # 阶段 1：不断发送命令，直到命令执行失败（证明容器已断开连接，真正开始重启）
-        while pct exec "$NEW_VMID" -- true >/dev/null 2>&1; do
+        
+        # 只要文件还在且能连通，就说明重启还没真正发生
+        # 一旦文件消失(内存清空) 或 pct exec 连不上(进程隔离重置)，立刻跳出循环！
+        while pct exec "$NEW_VMID" -- test -f /tmp/reboot_marker >/dev/null 2>&1; do
             offline_count=$((offline_count + 1))
-            if [ "$offline_count" -ge 15 ]; then
-                log "警告：容器迟迟未下线，可能重启卡死。"
-                break
+            if [ "$offline_count" -ge 20 ]; then
+                log "严重警告：容器未响应重启信号，可能发生死锁。"
+                rollback
             fi
             sleep 1
         done
-        log "检测到容器已下线，正在等待重新加载系统配置..."
         
-        # 阶段 2：复用我们之前的智能轮询，等待 ubus 核心组件重新拉起
+        log "检测到旧内存已清空，系统已进入重置引导阶段 (耗时约 $offline_count 秒)。"
+        
+        log "正在等待新容器 ubus 核心总线重新拉起..."
         if ! wait_container_ready "$NEW_VMID" 30 "ubus call system board"; then
             log "严重错误：新容器还原配置并重启后无响应。"
             rollback
         fi
-        # ====================================================
+        # ================================================================
     fi
 }
 
