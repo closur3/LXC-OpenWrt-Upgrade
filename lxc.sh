@@ -62,7 +62,7 @@ rollback() {
 wait_container_ready() {
     local vmid=$1
     local max_retries=${2:-30}
-    local check_cmd=${3:-"true"} # 默认执行 true，也可传入更高阶的检查命令
+    local check_cmd=${3:-"true"}
     local count=0
     
     while ! pct exec "$vmid" -- $check_cmd >/dev/null 2>&1; do
@@ -322,7 +322,6 @@ perform_restore() {
 
         # ================= 终极精准轮询方案：内存标记法 =================
         log "正在设置内存重置标记..."
-        # /tmp 在 OpenWrt 中是 tmpfs (内存盘)，系统一旦重启必定清空
         pct exec "$NEW_VMID" -- touch /tmp/reboot_marker
         
         log "通过容器原生指令触发系统软重启..."
@@ -332,7 +331,6 @@ perform_restore() {
         local offline_count=0
         
         # 只要文件还在且能连通，就说明重启还没真正发生
-        # 一旦文件消失(内存清空) 或 pct exec 连不上(进程隔离重置)，立刻跳出循环！
         while pct exec "$NEW_VMID" -- test -f /tmp/reboot_marker >/dev/null 2>&1; do
             offline_count=$((offline_count + 1))
             if [ "$offline_count" -ge 20 ]; then
@@ -344,7 +342,7 @@ perform_restore() {
         
         log "检测到旧内存已清空，系统已进入重置引导阶段 (耗时约 $offline_count 秒)。"
         
-        log "正在等待新容器 ubus 核心总线重新拉起..."
+        log "正在等待新容器系统核心总线重新拉起..."
         if ! wait_container_ready "$NEW_VMID" 30 "ubus call system board"; then
             log "严重错误：新容器还原配置并重启后无响应。"
             rollback
@@ -356,12 +354,12 @@ perform_restore() {
 verify_network_and_cleanup() {
     if [ "$backup_enabled" = "1" ] && [ "$IS_NEW_INSTALL" -eq 0 ]; then
         log "正在等待代理插件启动并进行海外连通性测试 (目标: $network_check_url)..."
-        local max_retries=30
+        local max_retries=45
         local retry_count=0
         local network_up=0
 
         while [ $retry_count -lt $max_retries ]; do
-            # 设置极短的 1 秒超时时间，避免叠加导致的 6 分钟延迟漏洞
+            # 设置极短的 1 秒超时时间，避免叠加导致的延迟漏洞
             if pct exec "$NEW_VMID" -- wget -q -O /dev/null -T 1 "$network_check_url" >/dev/null 2>&1; then
                 network_up=1
                 log "网络已连通！容器海外访问恢复，耗时约 $((retry_count * 2)) 秒。"
