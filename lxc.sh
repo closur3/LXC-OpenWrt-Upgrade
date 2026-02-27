@@ -111,9 +111,21 @@ check_command() {
 }
 
 rollback() {
-    log "正在启动故障保护：关闭新容器，回滚启动旧容器..."
-    pct stop "$NEW_VMID" 2>/dev/null || true
-    [ -n "$OLD_VMID" ] && pct start "$OLD_VMID" 2>/dev/null || true
+    log "正在启动故障保护：回滚启动旧容器，并彻底清理失败的新容器..."
+    
+    # 1. 如果新容器已经分配了 ID，就停止并销毁它
+    if [ -n "$NEW_VMID" ]; then
+        pct stop "$NEW_VMID" 2>/dev/null || true
+        pct destroy "$NEW_VMID" --purge 2>/dev/null || true
+        log "已清理残留的失败容器 ($NEW_VMID)。"
+    fi
+    
+    # 2. 重新拉起旧容器恢复网络
+    if [ -n "$OLD_VMID" ]; then
+        pct start "$OLD_VMID" 2>/dev/null || true
+        log "旧容器 ($OLD_VMID) 已重新启动，网络已恢复。"
+    fi
+    
     exit 1
 }
 
