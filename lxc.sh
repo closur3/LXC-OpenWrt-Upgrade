@@ -3,19 +3,20 @@ set -euo pipefail
 export LC_ALL=C
 
 ############################# 1. 默认全局配置项 (基座) #############################
-# 这里是脚本自带的“出厂设置”，请永远不要修改这里的值！
-# 以免未来自动更新时发生冲突。所有自定义设置请在脚本同级目录创建同名 .conf 文件进行修改。
+# 【警告】请勿修改本文件中的默认值！以免未来脚本自动更新时发生冲突。
+# 如需自定义参数，脚本运行后会在同级目录自动生成 .conf.example 参考手册。
+# 请创建一个同名的 .conf 文件来进行差量覆盖。
 
 SCRIPT_URL="https://raw.githubusercontent.com/closur3/LXC-OpenWrt-Upgrade/main/lxc.sh"
 auto_update="1"          # 自动检查更新开关 (1=开启, 0=关闭)
 vmid_min=100
 vmid_max=999
-backup_enabled="1"
+backup_enabled="1"       # 备份还原开关 (1=开启, 0=关闭)
 backup_file="/tmp/backup.tar.gz"
 download_url="https://github.com/closur3/OpenWrt-Mainline/releases/latest/download/openwrt-x86-64-generic-rootfs.tar.gz"
 network_check_url="https://www.google.com/generate_204"
 
-# 容器默认/基础参数
+# 容器默认/基础参数 (全新安装时生效，升级时会自动继承旧容器配置)
 template="local:vztmpl/openwrt-x86-64-generic-rootfs.tar.gz"
 rootfs="local-lvm:1"
 config_hostname="OpenWrt"
@@ -29,21 +30,63 @@ startup=""
 features=""
 network_configs=""
 
-# 运行时状态变量（全局共享）
+# 运行时状态变量（全局共享，无需干预）
 IS_NEW_INSTALL=0
 OLD_VMID=""
 NEW_VMID=""
 HOST_BACKUP_FILE=""
 ##################################################################################
 
-# ==================== 2. 加载本地自定义配置 (同目录同名 .conf) ====================
-# 动态获取当前脚本的绝对路径，并把后缀替换为 .conf (例如: /root/lxc.sh -> /root/lxc.conf)
+# ==================== 2. 动态配置管理 (生成与加载) ====================
 SCRIPT_ABS_PATH=$(readlink -f "$0")
 CONFIG_FILE="${SCRIPT_ABS_PATH%.*}.conf"
+EXAMPLE_FILE="${SCRIPT_ABS_PATH%.*}.conf.example"
 
+# 永远生成/刷新最新的配置说明书 (.example)
+cat << 'EOF' > "$EXAMPLE_FILE"
+# =================================================================
+# LXC OpenWrt 自动升级脚本 - 全量配置参考手册 (Example)
+# =================================================================
+# 【注意】此文件由脚本自动生成，每次运行都会刷新。请勿直接修改！
+# 
+# 【如何自定义配置？】
+# 1. 脚本默认使用内置参数运行，如果你不需要更改，什么都不用做。
+# 2. 如果你需要覆盖默认参数，请在同级目录下手动创建一个同名的 .conf 文件 (例如: lxc.conf)。
+# 3. 将本文件中你想要修改的行（去掉开头的 # 号）复制到你的 .conf 中并修改其值即可。
+# =================================================================
+
+# 自动检查更新开关 (1=开启自动检查并覆盖自身, 0=关闭纯本地运行)
+# auto_update="1"
+
+# 新容器 VMID 寻址范围 (脚本会在此范围内自动寻找空闲 ID)
+# vmid_min=100
+# vmid_max=999
+
+# 是否开启配置备份与还原 (1=开启, 0=不备份/不还原)
+# backup_enabled="1"
+
+# 网络连通性测试目标 URL (用于判断科学上网代理是否启动成功)
+# network_check_url="https://www.google.com/generate_204"
+
+# ----------------- 容器高级硬件/网络参数 -----------------
+# PVE 存储池名称 (根据你的 PVE 实际情况修改，通常是 local-lvm 或 local-zfs)
+# rootfs="local-lvm:1"
+
+# 容器分配的 CPU 核心数与内存大小 (MB)
+# cores="2"
+# memory="1024"
+# swap="0"
+
+# 容器网络接口配置 (务必匹配你宿主机的网桥名称)
+# network_configs="--net0 name=eth0,bridge=vmbr0"
+
+# 容器特权与嵌套功能 (软路由通常需要开启嵌套以支持各种功能)
+# features="nesting=1"
+EOF
+
+# 加载用户的实际配置文件 (差量覆盖)
 if [ -f "$CONFIG_FILE" ]; then
-    # 临时关闭未绑定变量报错，包容用户配置文件的随意性
-    set +u
+    set +u # 临时关闭未绑定变量报错，包容配置文件的随意性
     source "$CONFIG_FILE"
     set -u
 fi
@@ -74,6 +117,7 @@ rollback() {
     exit 1
 }
 
+# 智能轮询核心探针
 wait_container_ready() {
     local vmid=$1
     local max_retries=${2:-30}
@@ -86,7 +130,7 @@ wait_container_ready() {
         sleep 1
     done
     
-    log "容器 $vmid 核心组件已就绪，耗时约 $count 秒。"
+    log "容器 $vmid 系统核心组件已就绪，耗时约 $count 秒。"
     return 0
 }
 
@@ -309,7 +353,7 @@ provision_and_start_new() {
     check_result $? "创建新容器失败。"
 
     if [ "$IS_NEW_INSTALL" -eq 1 ]; then
-        log "全新容器已成功创建。默认未启动，请进入 Proxmox 面板或使用终端配置网络后再手动启动。"
+        log "全新容器已成功创建。默认未启动，请进入 Proxmox 面板手动启动。"
         exit 0
     fi
 
@@ -318,7 +362,8 @@ provision_and_start_new() {
     check_result $? "启动新容器失败。"
 
     log "正在主动轮询等待新容器系统初始化..."
-    if ! wait_container_ready "$NEW_VMID" 15 "/bin/ubus call system board"; then
+    # 彻底解决环境变量缺失，使用 /bin/sh -c 引导执行原生 ubus 探测
+    if ! wait_container_ready "$NEW_VMID" 15 "/bin/sh -c 'ubus call system board'"; then
         log "严重错误：新容器启动后长时间无响应，无法继续执行还原。"
         rollback
     fi
@@ -334,6 +379,7 @@ perform_restore() {
         
         rm -f "$HOST_BACKUP_FILE"
 
+        # 内存重置标记法：彻底解决软重启假死误判
         log "正在设置内存重置标记..."
         pct exec "$NEW_VMID" -- touch /tmp/reboot_marker
         
@@ -355,7 +401,7 @@ perform_restore() {
         log "检测到旧内存已清空，系统已进入重置引导阶段 (耗时约 $offline_count 秒)。"
         
         log "正在等待新容器系统核心总线重新拉起..."
-        if ! wait_container_ready "$NEW_VMID" 30 "/bin/ubus call system board"; then
+        if ! wait_container_ready "$NEW_VMID" 30 "/bin/sh -c 'ubus call system board'"; then
             log "严重错误：新容器还原配置并重启后无响应。"
             rollback
         fi
@@ -405,7 +451,7 @@ verify_network_and_cleanup() {
 main() {
     init_environment
     
-    # 1. 优先解析外部参数，决定是否强制开启本次更新
+    # 1. 解析外部参数，接收 -u 或 -n 强行接管
     parse_args "$@"
     
     # 2. 判断是否执行远程自更新
