@@ -363,7 +363,7 @@ provision_and_start_new() {
 
     log "正在主动轮询等待新容器系统初始化..."
     # 彻底解决环境变量缺失，使用 /bin/sh -c 引导执行原生 ubus 探测
-    if ! wait_container_ready "$NEW_VMID" 15 "/bin/sh -c 'ubus call system board'"; then
+    if ! wait_container_ready "$NEW_VMID" 15 "/bin/ubus call system board"; then
         log "严重错误：新容器启动后长时间无响应，无法继续执行还原。"
         rollback
     fi
@@ -401,7 +401,7 @@ perform_restore() {
         log "检测到旧内存已清空，系统已进入重置引导阶段 (耗时约 $offline_count 秒)。"
         
         log "正在等待新容器系统核心总线重新拉起..."
-        if ! wait_container_ready "$NEW_VMID" 30 "/bin/sh -c 'ubus call system board'"; then
+        if ! wait_container_ready "$NEW_VMID" 30 "/bin/ubus call system board"; then
             log "严重错误：新容器还原配置并重启后无响应。"
             rollback
         fi
