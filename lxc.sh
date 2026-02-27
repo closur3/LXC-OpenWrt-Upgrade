@@ -2,8 +2,12 @@
 set -euo pipefail
 export LC_ALL=C
 
-############################# 全局配置项 #############################
+############################# 1. 默认全局配置项 (基座) #############################
+# 这里是脚本自带的“出厂设置”，请永远不要修改这里的值！
+# 以免未来自动更新时发生冲突。所有自定义设置请在脚本同级目录创建同名 .conf 文件进行修改。
+
 SCRIPT_URL="https://raw.githubusercontent.com/closur3/LXC-OpenWrt-Upgrade/main/lxc.sh"
+auto_update="1"          # 自动检查更新开关 (1=开启, 0=关闭)
 vmid_min=100
 vmid_max=999
 backup_enabled="1"
@@ -30,7 +34,20 @@ IS_NEW_INSTALL=0
 OLD_VMID=""
 NEW_VMID=""
 HOST_BACKUP_FILE=""
-######################################################################
+##################################################################################
+
+# ==================== 2. 加载本地自定义配置 (同目录同名 .conf) ====================
+# 动态获取当前脚本的绝对路径，并把后缀替换为 .conf (例如: /root/lxc.sh -> /root/lxc.conf)
+SCRIPT_ABS_PATH=$(readlink -f "$0")
+CONFIG_FILE="${SCRIPT_ABS_PATH%.*}.conf"
+
+if [ -f "$CONFIG_FILE" ]; then
+    # 临时关闭未绑定变量报错，包容用户配置文件的随意性
+    set +u
+    source "$CONFIG_FILE"
+    set -u
+fi
+# ========================================================================
 
 # ================= 基础工具函数 =================
 
@@ -50,7 +67,6 @@ check_command() {
     command -v "$1" >/dev/null 2>&1 || { log "缺少必要命令: $1"; exit 1; }
 }
 
-# 统一的故障回滚机制
 rollback() {
     log "正在启动故障保护：关闭新容器，回滚启动旧容器..."
     pct stop "$NEW_VMID" 2>/dev/null || true
@@ -58,7 +74,6 @@ rollback() {
     exit 1
 }
 
-# 智能轮询等待容器就绪 (支持自定义探测命令)
 wait_container_ready() {
     local vmid=$1
     local max_retries=${2:-30}
@@ -71,7 +86,7 @@ wait_container_ready() {
         sleep 1
     done
     
-    log "容器 $vmid 系统核心组件已就绪，耗时约 $count 秒。"
+    log "容器 $vmid 核心组件已就绪，耗时约 $count 秒。"
     return 0
 }
 
@@ -84,7 +99,23 @@ init_environment() {
     done
 }
 
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -n|--no-backup) backup_enabled="0" ;; # 命令行强制跳过备份
+            -u|--update) auto_update="1" ;;       # 命令行强制开启本次更新
+            *) log "未知选项：$1"; exit 1 ;;
+        esac
+        shift
+    done
+}
+
 check_update() {
+    if [ "$auto_update" != "1" ]; then
+        log "自动更新已禁用，直接运行本地版本。"
+        return 0
+    fi
+
     log "正在检查脚本更新..."
     local temp_file="/tmp/lxc_update_remote.sh"
     
@@ -111,22 +142,6 @@ check_update() {
     else
         log "检查更新失败，将继续运行当前版本。"
     fi
-}
-
-parse_args() {
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -off) backup_enabled="0" ;;
-            *) log "未知选项：$1"; exit 1 ;;
-        esac
-        shift
-    done
-
-    case "$backup_enabled" in
-        0) log "备份：已禁用" ;;
-        1) log "备份：已启用" ;;
-        *) log "备份选项未知，已关闭"; backup_enabled="0" ;;
-    esac
 }
 
 find_target_container() {
@@ -303,8 +318,7 @@ provision_and_start_new() {
     check_result $? "启动新容器失败。"
 
     log "正在主动轮询等待新容器系统初始化..."
-    # 核心组件检查：ubus call system board
-    if ! wait_container_ready "$NEW_VMID" 15 "ubus call system board"; then
+    if ! wait_container_ready "$NEW_VMID" 15 "/bin/ubus call system board"; then
         log "严重错误：新容器启动后长时间无响应，无法继续执行还原。"
         rollback
     fi
@@ -320,7 +334,6 @@ perform_restore() {
         
         rm -f "$HOST_BACKUP_FILE"
 
-        # ================= 终极精准轮询方案：内存标记法 =================
         log "正在设置内存重置标记..."
         pct exec "$NEW_VMID" -- touch /tmp/reboot_marker
         
@@ -330,7 +343,6 @@ perform_restore() {
         log "正在监控内存标记，等待旧系统服务卸载..."
         local offline_count=0
         
-        # 只要文件还在且能连通，就说明重启还没真正发生
         while pct exec "$NEW_VMID" -- test -f /tmp/reboot_marker >/dev/null 2>&1; do
             offline_count=$((offline_count + 1))
             if [ "$offline_count" -ge 20 ]; then
@@ -343,11 +355,10 @@ perform_restore() {
         log "检测到旧内存已清空，系统已进入重置引导阶段 (耗时约 $offline_count 秒)。"
         
         log "正在等待新容器系统核心总线重新拉起..."
-        if ! wait_container_ready "$NEW_VMID" 30 "ubus call system board"; then
+        if ! wait_container_ready "$NEW_VMID" 30 "/bin/ubus call system board"; then
             log "严重错误：新容器还原配置并重启后无响应。"
             rollback
         fi
-        # ================================================================
     fi
 }
 
@@ -359,7 +370,6 @@ verify_network_and_cleanup() {
         local network_up=0
 
         while [ $retry_count -lt $max_retries ]; do
-            # 设置极短的 1 秒超时时间，避免叠加导致的延迟漏洞
             if pct exec "$NEW_VMID" -- wget -q -O /dev/null -T 1 "$network_check_url" >/dev/null 2>&1; then
                 network_up=1
                 log "网络已连通！容器海外访问恢复，耗时约 $((retry_count * 2)) 秒。"
@@ -394,10 +404,22 @@ verify_network_and_cleanup() {
 # ================= 主控制流 =================
 main() {
     init_environment
+    
+    # 1. 优先解析外部参数，决定是否强制开启本次更新
+    parse_args "$@"
+    
+    # 2. 判断是否执行远程自更新
     check_update "$@"
     
     log "开始执行脚本主流程..."
-    parse_args "$@"
+    [ -f "$CONFIG_FILE" ] && log "已加载外部自定义配置文件: $CONFIG_FILE"
+    
+    case "$backup_enabled" in
+        0) log "备份：已禁用" ;;
+        1) log "备份：已启用" ;;
+        *) log "备份选项未知，已关闭"; backup_enabled="0" ;;
+    esac
+
     find_target_container
     prepare_container_config
     allocate_new_vmid
