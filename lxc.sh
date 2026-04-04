@@ -42,8 +42,9 @@ SCRIPT_ABS_PATH=$(readlink -f "$0")
 CONFIG_FILE="${SCRIPT_ABS_PATH%.*}.conf"
 EXAMPLE_FILE="${SCRIPT_ABS_PATH%.*}.conf.example"
 
-# 永远生成/刷新最新的配置说明书 (.example)
-cat << 'EOF' > "$EXAMPLE_FILE"
+# 仅在不存在自定义配置文件时，才生成配置说明书 (.example)
+if [ ! -f "$CONFIG_FILE" ]; then
+    cat << 'EOF' > "$EXAMPLE_FILE"
 # =================================================================
 # LXC OpenWrt 自动升级脚本 - 全量配置参考手册 (Example)
 # =================================================================
@@ -83,6 +84,7 @@ cat << 'EOF' > "$EXAMPLE_FILE"
 # 容器特权与嵌套功能 (软路由通常需要开启嵌套以支持各种功能)
 # features="nesting=1"
 EOF
+fi
 
 # 加载用户的实际配置文件 (差量覆盖)
 if [ -f "$CONFIG_FILE" ]; then
