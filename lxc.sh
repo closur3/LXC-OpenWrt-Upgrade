@@ -180,16 +180,16 @@ check_update() {
     if wget -q -T 5 -O "$temp_file" "$SCRIPT_URL"; then
         if grep -q "^#!/bin/bash" "$temp_file"; then
             local local_md5 remote_md5
-            local_md5=$(md5sum "$0" | awk '{print $1}')
+            local_md5=$(md5sum "$SCRIPT_ABS_PATH" | awk '{print $1}')
             remote_md5=$(md5sum "$temp_file" | awk '{print $1}')
             
             if [ "$local_md5" != "$remote_md5" ]; then
                 log "发现新版本脚本！正在自动覆盖更新..."
-                cat "$temp_file" > "$0"
-                chmod +x "$0"
+                cat "$temp_file" > "$SCRIPT_ABS_PATH"
+                chmod +x "$SCRIPT_ABS_PATH"
                 rm -f "$temp_file"
                 log "更新完成！正在应用新版本重启脚本..."
-                exec "$0" "$@"
+                exec "$SCRIPT_ABS_PATH" "$@"
             else
                 log "当前已是最新版本。"
             fi
