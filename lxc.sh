@@ -326,6 +326,13 @@ resolve_latest_firmware_url() {
     return 0
 }
 
+normalize_firmware_source_id() {
+    local url="$1"
+    # GitHub release-assets URL includes expiring query params (jwt/se/sig).
+    # We only keep the stable URL body for version comparison.
+    printf '%s\n' "${url%%\?*}"
+}
+
 download_firmware() {
     log "正在下载 OpenWrt 最新版本..."
     local cache_dir="/var/lib/vz/template/cache"
@@ -333,17 +340,19 @@ download_firmware() {
     local temp_file="${firmware_file}.download.$$"
     local state_file="${firmware_file}.source_url"
     local latest_url=""
-    local cached_url=""
+    local latest_source_id=""
+    local cached_source_id=""
 
     mkdir -p "$cache_dir"
     rm -f "$temp_file"
 
     if [ -f "$state_file" ]; then
-        cached_url=$(cat "$state_file" 2>/dev/null || true)
+        cached_source_id=$(cat "$state_file" 2>/dev/null || true)
     fi
 
     if latest_url=$(resolve_latest_firmware_url); then
-        if [ "$latest_url" = "$cached_url" ] && validate_firmware_archive "$firmware_file"; then
+        latest_source_id=$(normalize_firmware_source_id "$latest_url")
+        if [ "$latest_source_id" = "$cached_source_id" ] && validate_firmware_archive "$firmware_file"; then
             log "检测到固件版本未变化，且本地缓存可用，跳过下载。"
             return 0
         fi
@@ -360,7 +369,7 @@ download_firmware() {
     if wget --tries=2 --timeout=15 --dns-timeout=5 --connect-timeout=5 --read-timeout=15 -O "$temp_file" "$latest_url"; then
         if validate_firmware_archive "$temp_file"; then
             mv -f "$temp_file" "$firmware_file"
-            printf '%s\n' "$latest_url" > "$state_file"
+            printf '%s\n' "$latest_source_id" > "$state_file"
             log "下载成功，且固件完整性校验通过。"
             return 0
         fi
