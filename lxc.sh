@@ -2,21 +2,18 @@
 set -euo pipefail
 export LC_ALL=C
 
-############################# 1. 默认全局配置项 (基座) #############################
-# 【警告】请勿修改本文件中的默认值！以免未来脚本自动更新时发生冲突。
-# 如需自定义参数，脚本运行后会在同级目录自动生成 .conf.example 参考手册。
-# 请创建一个同名的 .conf 文件来进行差量覆盖。
-
+###############################################################################
+# 默认配置（请在同目录 .conf 覆盖，不要直接改本文件）
+###############################################################################
 SCRIPT_URL="https://raw.githubusercontent.com/closur3/LXC-OpenWrt-Upgrade/main/lxc.sh"
-auto_update="1"          # 自动检查更新开关 (1=开启, 0=关闭)
+auto_update="1"
 vmid_min=100
 vmid_max=999
-backup_enabled="1"       # 备份还原开关 (1=开启, 0=关闭)
+backup_enabled="1"
 backup_file="/tmp/backup.tar.gz"
 download_url="https://github.com/closur3/OpenWrt-Mainline/releases/latest/download/openwrt-x86-64-generic-rootfs.tar.gz"
 network_check_url="https://www.google.com/generate_204"
 
-# 容器默认/基础参数 (全新安装时生效，升级时会自动继承旧容器配置)
 template="local:vztmpl/openwrt-x86-64-generic-rootfs.tar.gz"
 rootfs="local-lvm:1"
 config_hostname="OpenWrt"
@@ -30,7 +27,9 @@ startup=""
 features=""
 network_configs=""
 
-# 运行时状态变量（全局共享，无需干预）
+###############################################################################
+# 运行时状态
+###############################################################################
 IS_NEW_INSTALL=0
 OLD_VMID=""
 NEW_VMID=""
@@ -39,64 +38,9 @@ FIRMWARE_STATUS="unknown"
 DRY_RUN=0
 FORCE_SAME_VERSION_UPGRADE=0
 UPDATE_ONLY=0
-##################################################################################
-
-# ==================== 2. 动态配置管理 (生成与加载) ====================
-SCRIPT_ABS_PATH=$(readlink -f "$0")
-CONFIG_FILE="${SCRIPT_ABS_PATH%.*}.conf"
-EXAMPLE_FILE="${SCRIPT_ABS_PATH%.*}.conf.example"
-
-# 仅在不存在自定义配置文件时，才生成配置说明书 (.example)
-if [ ! -f "$CONFIG_FILE" ]; then
-    cat << 'EOF' > "$EXAMPLE_FILE"
-# =================================================================
-# LXC OpenWrt 自动升级脚本 - 全量配置参考手册 (Example)
-# =================================================================
-# 【注意】此文件由脚本自动生成，每次运行都会刷新。请勿直接修改！
-# 
-# 【如何自定义配置？】
-# 1. 脚本默认使用内置参数运行，如果你不需要更改，什么都不用做。
-# 2. 如果你需要覆盖默认参数，请在同级目录下手动创建一个同名的 .conf 文件 (例如: lxc.conf)。
-# 3. 将本文件中你想要修改的行（去掉开头的 # 号）复制到你的 .conf 中并修改其值即可。
-# =================================================================
-
-# 自动检查更新开关 (1=开启自动检查并覆盖自身, 0=关闭纯本地运行)
-# auto_update="1"
-
-# 新容器 VMID 寻址范围 (脚本会在此范围内自动寻找空闲 ID)
-# vmid_min=100
-# vmid_max=999
-
-# 是否开启配置备份与还原 (1=开启, 0=不备份/不还原)
-# backup_enabled="1"
-
-# 网络连通性测试目标 URL (用于判断科学上网代理是否启动成功)
-# network_check_url="https://www.google.com/generate_204"
-
-# ----------------- 容器高级硬件/网络参数 -----------------
-# PVE 存储池名称 (根据你的 PVE 实际情况修改，通常是 local-lvm 或 local-zfs)
-# rootfs="local-lvm:1"
-
-# 容器分配的 CPU 核心数与内存大小 (MB)
-# cores="2"
-# memory="1024"
-# swap="0"
-
-# 容器网络接口配置 (务必匹配你宿主机的网桥名称)
-# network_configs="--net0 name=eth0,bridge=vmbr0"
-
-# 容器特权与嵌套功能 (软路由通常需要开启嵌套以支持各种功能)
-# features="nesting=1"
-EOF
-fi
-
-# 加载用户的实际配置文件 (差量覆盖)
-if [ -f "$CONFIG_FILE" ]; then
-    set +u # 临时关闭未绑定变量报错，包容配置文件的随意性
-    source "$CONFIG_FILE"
-    set -u
-fi
-# ========================================================================
+SCRIPT_ABS_PATH=""
+CONFIG_FILE=""
+EXAMPLE_FILE=""
 
 # ================= 基础工具函数 =================
 
@@ -109,14 +53,7 @@ die() {
     exit 1
 }
 
-check_result() {
-    local code=$1 msg=$2
-    if [ "$code" -ne 0 ]; then
-        die "$msg"
-    fi
-}
-
-check_command() {
+require_cmd() {
     command -v "$1" >/dev/null 2>&1 || die "缺少必要命令: $1"
 }
 
@@ -132,6 +69,51 @@ show_help() {
   -d, --dry-run     仅检查流程与条件，不执行任何变更操作
   -h, --help        显示本帮助并退出
 EOF
+}
+
+init_paths() {
+    local script_dir script_name
+    script_dir=$(cd "$(dirname "$0")" && pwd)
+    script_name=$(basename "$0")
+    SCRIPT_ABS_PATH="${script_dir}/${script_name}"
+    CONFIG_FILE="${SCRIPT_ABS_PATH%.*}.conf"
+    EXAMPLE_FILE="${SCRIPT_ABS_PATH%.*}.conf.example"
+}
+
+ensure_example_config() {
+    [ -f "$CONFIG_FILE" ] && return 0
+    cat << 'EOF' > "$EXAMPLE_FILE"
+# =================================================================
+# LXC OpenWrt 自动升级脚本 - 全量配置参考手册 (Example)
+# =================================================================
+# 自动检查更新开关
+# auto_update="1"
+# vmid 范围
+# vmid_min=100
+# vmid_max=999
+# 是否开启备份
+# backup_enabled="1"
+# 连通性测试地址
+# network_check_url="https://www.google.com/generate_204"
+# 存储池
+# rootfs="local-lvm:1"
+# CPU/内存
+# cores="2"
+# memory="1024"
+# swap="0"
+# 网络配置
+# network_configs="--net0 name=eth0,bridge=vmbr0"
+# 容器特性
+# features="nesting=1"
+EOF
+}
+
+load_user_config() {
+    [ -f "$CONFIG_FILE" ] || return 0
+    set +u
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+    set -u
 }
 
 rollback() {
@@ -174,8 +156,8 @@ wait_container_ready() {
 
 init_environment() {
     [ "$(id -u)" -eq 0 ] || die "请使用 root 权限运行此脚本"
-    for cmd in pct qm wget curl awk grep sort uniq md5sum cat rm chmod gzip tar mv sed cut xargs seq wc mkdir; do
-        check_command "$cmd"
+    for cmd in pct qm wget curl awk grep sort uniq md5sum cat rm chmod gzip tar mv sed cut xargs seq wc mkdir dirname basename; do
+        require_cmd "$cmd"
     done
 }
 
@@ -193,7 +175,7 @@ parse_args() {
     done
 }
 
-check_update() {
+self_update() {
     local force_update="${1:-0}"
     shift || true
 
@@ -238,11 +220,11 @@ check_update() {
         return 0
     fi
 
-    log "发现新版本脚本！正在自动覆盖更新..."
+    log "发现新版本脚本，正在覆盖更新..."
     cat "$temp_file" > "$SCRIPT_ABS_PATH"
     chmod +x "$SCRIPT_ABS_PATH"
     rm -f "$temp_file"
-    log "更新完成！正在应用新版本重启脚本..."
+    log "更新完成，正在重启脚本应用新版本..."
     exec "$SCRIPT_ABS_PATH" "$@"
 }
 
@@ -446,15 +428,12 @@ perform_backup_and_stop_old() {
     if [ "$IS_NEW_INSTALL" -eq 0 ]; then
         if [ "$backup_enabled" = "1" ]; then
             log "创建备份并从旧容器中拉取备份..."
-            pct exec "$OLD_VMID" -- sysupgrade -b "$backup_file"
-            check_result $? "创建备份失败。"
-            pct pull "$OLD_VMID" "$backup_file" "$HOST_BACKUP_FILE"
-            check_result $? "从容器中拉取备份失败。"
+            pct exec "$OLD_VMID" -- sysupgrade -b "$backup_file" || die "创建备份失败。"
+            pct pull "$OLD_VMID" "$backup_file" "$HOST_BACKUP_FILE" || die "从容器中拉取备份失败。"
         fi
 
         log "停止旧容器以避免网络冲突..."
-        pct stop "$OLD_VMID"
-        check_result $? "停止旧容器失败。"
+        pct stop "$OLD_VMID" || die "停止旧容器失败。"
     fi
 }
 
@@ -480,8 +459,7 @@ provision_and_start_new() {
     fi
 
     log "启动新容器..."
-    pct start "$NEW_VMID"
-    check_result $? "启动新容器失败。"
+    pct start "$NEW_VMID" || die "启动新容器失败。"
 
     log "正在主动轮询等待新容器系统初始化..."
     # 彻底解决环境变量缺失，使用 /bin/sh -c 引导执行原生 ubus 探测
@@ -494,10 +472,8 @@ provision_and_start_new() {
 perform_restore() {
     if [ "$backup_enabled" = "1" ]; then
         log "在新容器中还原备份..."
-        pct push "$NEW_VMID" "$HOST_BACKUP_FILE" "$backup_file"
-        check_result $? "将备份推送到新容器失败。"
-        pct exec "$NEW_VMID" -- sysupgrade -r "$backup_file"
-        check_result $? "在新容器中还原备份失败。"
+        pct push "$NEW_VMID" "$HOST_BACKUP_FILE" "$backup_file" || die "将备份推送到新容器失败。"
+        pct exec "$NEW_VMID" -- sysupgrade -r "$backup_file" || die "在新容器中还原备份失败。"
         
         rm -f "$HOST_BACKUP_FILE"
 
@@ -564,8 +540,7 @@ verify_network_and_cleanup() {
     fi
 
     log "正在销毁旧容器 ($OLD_VMID)..."
-    pct destroy "$OLD_VMID" --purge
-    check_result $? "销毁旧容器失败。"
+    pct destroy "$OLD_VMID" --purge || die "销毁旧容器失败。"
     log "脚本执行完成。"
 }
 
@@ -602,12 +577,13 @@ run_upgrade_flow() {
 }
 
 main() {
-    # 先解析参数，让 -u 能在仅更新模式下优先生效
+    init_paths
+    ensure_example_config
+    load_user_config
     parse_args "$@"
     init_environment
 
-    # check_update 会在有新版本时自动 exec 重启脚本
-    check_update "$UPDATE_ONLY" "$@"
+    self_update "$UPDATE_ONLY" "$@"
     if [ "$UPDATE_ONLY" -eq 1 ]; then
         log "仅更新模式执行完成，脚本已退出。"
         exit 0
