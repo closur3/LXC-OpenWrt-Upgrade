@@ -152,7 +152,7 @@ wait_container_ready() {
 
 init_environment() {
     [ "$(id -u)" -eq 0 ] || { log "请使用 root 权限运行此脚本"; exit 1; }
-    for cmd in pct qm wget curl awk grep sort uniq md5sum cat rm chmod; do
+    for cmd in pct qm wget curl awk grep sort uniq md5sum cat rm chmod gzip tar mv; do
         check_command "$cmd"
     done
 }
@@ -310,30 +310,43 @@ allocate_new_vmid() {
     log "错误：$vmid_min~$vmid_max 范围内均无可用VMID"; exit 1
 }
 
+validate_firmware_archive() {
+    local file="$1"
+    [ -s "$file" ] || return 1
+    gzip -t "$file" >/dev/null 2>&1 || return 1
+    tar -tzf "$file" >/dev/null 2>&1 || return 1
+    return 0
+}
+
 download_firmware() {
     log "正在下载 OpenWrt 最新版本..."
-    local wget_output=$(wget -N "$download_url" -P /var/lib/vz/template/cache/ 2>&1 || true)
+    local cache_dir="/var/lib/vz/template/cache"
+    local firmware_file="$cache_dir/openwrt-x86-64-generic-rootfs.tar.gz"
+    local temp_file="${firmware_file}.download.$$"
 
-    if echo "$wget_output" | grep -q "Omitting download"; then
-        if [ "$IS_NEW_INSTALL" -eq 1 ]; then
-            log "本地已有固件缓存，继续创建。"
-        else
-            if [[ -t 0 && -t 1 ]]; then
-                while :; do
-                    read -t 30 -p "固件没有更新。是否强制继续？ [y/n]: " choice || choice="n"
-                    case "$choice" in
-                        y|Y) break ;;
-                        n|N) log "脚本执行中止。"; exit 0 ;;
-                        *) echo "请输入 y 或 n。" ;;
-                    esac
-                done
-            else
-                log "固件没有更新，自动跳过更新。"; exit 0
-            fi
+    mkdir -p "$cache_dir"
+    rm -f "$temp_file"
+
+    if wget --tries=2 --timeout=15 --dns-timeout=5 --connect-timeout=5 --read-timeout=15 -O "$temp_file" "$download_url"; then
+        if validate_firmware_archive "$temp_file"; then
+            mv -f "$temp_file" "$firmware_file"
+            log "下载成功，且固件完整性校验通过。"
+            return 0
         fi
-    else
-        log "下载成功"
+        rm -f "$temp_file"
+        log "错误：下载得到的固件文件不完整或已损坏（GitHub 不可达时常见）。"
+        exit 1
     fi
+
+    rm -f "$temp_file"
+    log "下载失败，尝试使用本地缓存固件..."
+    if validate_firmware_archive "$firmware_file"; then
+        log "本地缓存固件可用，继续执行。"
+        return 0
+    fi
+
+    log "错误：下载失败且本地缓存固件不可用，终止执行以避免停机后升级失败。"
+    exit 1
 }
 
 perform_backup_and_stop_old() {
@@ -363,8 +376,10 @@ provision_and_start_new() {
         create_args+=("${net_arr[@]}")
     fi
 
-    pct create "${create_args[@]}"
-    check_result $? "创建新容器失败。"
+    if ! pct create "${create_args[@]}"; then
+        log "创建新容器失败，触发回滚。"
+        rollback
+    fi
 
     if [ "$IS_NEW_INSTALL" -eq 1 ]; then
         log "全新容器已成功创建。默认未启动，请进入 Proxmox 面板手动启动。"
