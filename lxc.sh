@@ -37,6 +37,8 @@ NEW_VMID=""
 HOST_BACKUP_FILE=""
 FIRMWARE_STATUS="unknown"
 DRY_RUN=0
+FORCE_SAME_VERSION_UPGRADE=0
+UPDATE_ONLY=0
 ##################################################################################
 
 # ==================== 2. 动态配置管理 (生成与加载) ====================
@@ -102,16 +104,20 @@ log() {
     echo "[$(basename "$0") $(date +'%Y-%m-%d %H:%M:%S')] $*"
 }
 
+die() {
+    log "错误：$*"
+    exit 1
+}
+
 check_result() {
     local code=$1 msg=$2
     if [ "$code" -ne 0 ]; then
-        log "错误：$msg"
-        exit 1
+        die "$msg"
     fi
 }
 
 check_command() {
-    command -v "$1" >/dev/null 2>&1 || { log "缺少必要命令: $1"; exit 1; }
+    command -v "$1" >/dev/null 2>&1 || die "缺少必要命令: $1"
 }
 
 show_help() {
@@ -121,7 +127,7 @@ show_help() {
 
 选项:
   -n, --no-backup   跳过备份与恢复
-  -u, --update      强制执行一次脚本自更新检查
+  -u, --update      仅执行脚本自更新，然后退出
   -f, --force       即使固件版本未变化，也强制继续迁移流程
   -d, --dry-run     仅检查流程与条件，不执行任何变更操作
   -h, --help        显示本帮助并退出
@@ -167,8 +173,8 @@ wait_container_ready() {
 # ================= 核心业务逻辑函数 =================
 
 init_environment() {
-    [ "$(id -u)" -eq 0 ] || { log "请使用 root 权限运行此脚本"; exit 1; }
-    for cmd in pct qm wget curl awk grep sort uniq md5sum cat rm chmod gzip tar mv; do
+    [ "$(id -u)" -eq 0 ] || die "请使用 root 权限运行此脚本"
+    for cmd in pct qm wget curl awk grep sort uniq md5sum cat rm chmod gzip tar mv sed cut xargs seq wc mkdir; do
         check_command "$cmd"
     done
 }
@@ -177,8 +183,8 @@ parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -n|--no-backup) backup_enabled="0" ;; # 命令行强制跳过备份
-            -u|--update) auto_update="1" ;;       # 命令行强制开启本次更新
-            -f|--force) allow_same_version_upgrade="1" ;; # 命令行强制同版本也执行迁移
+            -u|--update) UPDATE_ONLY=1; auto_update="1" ;; # 仅更新脚本并退出
+            -f|--force) FORCE_SAME_VERSION_UPGRADE=1 ;; # 命令行强制同版本也执行迁移
             -d|--dry-run) DRY_RUN=1 ;;            # 仅检查流程，不做任何变更
             -h|--help) show_help; exit 0 ;;
             *) log "未知选项：$1"; echo; show_help; exit 1 ;;
@@ -188,42 +194,56 @@ parse_args() {
 }
 
 check_update() {
-    if [ "$DRY_RUN" -eq 1 ]; then
+    local force_update="${1:-0}"
+    shift || true
+
+    if [ "$DRY_RUN" -eq 1 ] && [ "$force_update" -ne 1 ]; then
         log "dry-run 模式：跳过脚本自更新。"
         return 0
     fi
 
-    if [ "$auto_update" != "1" ]; then
+    if [ "$auto_update" != "1" ] && [ "$force_update" -ne 1 ]; then
         log "自动更新已禁用，直接运行本地版本。"
         return 0
     fi
 
     log "正在检查脚本更新..."
     local temp_file="/tmp/lxc_update_remote.sh"
-    
-    if wget -q -T 5 -O "$temp_file" "$SCRIPT_URL"; then
-        if grep -q "^#!/bin/bash" "$temp_file"; then
-            local local_md5 remote_md5
-            local_md5=$(md5sum "$SCRIPT_ABS_PATH" | awk '{print $1}')
-            remote_md5=$(md5sum "$temp_file" | awk '{print $1}')
-            
-            if [ "$local_md5" != "$remote_md5" ]; then
-                log "发现新版本脚本！正在自动覆盖更新..."
-                cat "$temp_file" > "$SCRIPT_ABS_PATH"
-                chmod +x "$SCRIPT_ABS_PATH"
-                rm -f "$temp_file"
-                log "更新完成！正在应用新版本重启脚本..."
-                exec "$SCRIPT_ABS_PATH" "$@"
-            else
-                log "当前已是最新版本。"
-            fi
-        else
-            log "下载的文件验证失败，跳过更新。"
-        fi
+
+    rm -f "$temp_file"
+    if ! wget -q -T 8 -O "$temp_file" "$SCRIPT_URL"; then
         rm -f "$temp_file"
-    else
+        if [ "$force_update" -eq 1 ]; then
+            die "检查更新失败，无法完成仅更新模式。"
+        fi
         log "检查更新失败，将继续运行当前版本。"
+        return 0
     fi
+
+    if ! grep -q "^#!/bin/bash" "$temp_file"; then
+        rm -f "$temp_file"
+        if [ "$force_update" -eq 1 ]; then
+            die "下载的更新脚本验证失败，已终止。"
+        fi
+        log "下载的文件验证失败，跳过更新。"
+        return 0
+    fi
+
+    local local_md5 remote_md5
+    local_md5=$(md5sum "$SCRIPT_ABS_PATH" | awk '{print $1}')
+    remote_md5=$(md5sum "$temp_file" | awk '{print $1}')
+    if [ "$local_md5" = "$remote_md5" ]; then
+        rm -f "$temp_file"
+        log "当前已是最新版本。"
+        return 0
+    fi
+
+    log "发现新版本脚本！正在自动覆盖更新..."
+    cat "$temp_file" > "$SCRIPT_ABS_PATH"
+    chmod +x "$SCRIPT_ABS_PATH"
+    rm -f "$temp_file"
+    log "更新完成！正在应用新版本重启脚本..."
+    exec "$SCRIPT_ABS_PATH" "$@"
 }
 
 find_target_container() {
@@ -549,16 +569,7 @@ verify_network_and_cleanup() {
     log "脚本执行完成。"
 }
 
-# ================= 主控制流 =================
-main() {
-    init_environment
-    
-    # 1. 解析外部参数，接收 -u 或 -n 强行接管
-    parse_args "$@"
-    
-    # 2. 判断是否执行远程自更新
-    check_update "$@"
-    
+run_upgrade_flow() {
     log "开始执行脚本主流程..."
     [ -f "$CONFIG_FILE" ] && log "已加载外部自定义配置文件: $CONFIG_FILE"
     
@@ -573,7 +584,7 @@ main() {
     allocate_new_vmid
     download_firmware
 
-    if [ "$IS_NEW_INSTALL" -eq 0 ] && [ "$FIRMWARE_STATUS" = "same" ] && [ "${allow_same_version_upgrade:-0}" != "1" ]; then
+    if [ "$IS_NEW_INSTALL" -eq 0 ] && [ "$FIRMWARE_STATUS" = "same" ] && [ "$FORCE_SAME_VERSION_UPGRADE" -ne 1 ]; then
         log "固件版本未变化，默认跳过本次升级迁移（避免无意义切换容器）。"
         log "如需强制同版本重装，可使用 --force。"
         exit 0
@@ -588,6 +599,21 @@ main() {
     provision_and_start_new
     perform_restore
     verify_network_and_cleanup
+}
+
+main() {
+    # 先解析参数，让 -u 能在仅更新模式下优先生效
+    parse_args "$@"
+    init_environment
+
+    # check_update 会在有新版本时自动 exec 重启脚本
+    check_update "$UPDATE_ONLY" "$@"
+    if [ "$UPDATE_ONLY" -eq 1 ]; then
+        log "仅更新模式执行完成，脚本已退出。"
+        exit 0
+    fi
+
+    run_upgrade_flow
 }
 
 # 启动入口
