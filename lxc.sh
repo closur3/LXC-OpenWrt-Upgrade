@@ -35,6 +35,7 @@ IS_NEW_INSTALL=0
 OLD_VMID=""
 NEW_VMID=""
 HOST_BACKUP_FILE=""
+FIRMWARE_STATUS="unknown"
 ##################################################################################
 
 # ==================== 2. 动态配置管理 (生成与加载) ====================
@@ -162,6 +163,7 @@ parse_args() {
         case "$1" in
             -n|--no-backup) backup_enabled="0" ;; # 命令行强制跳过备份
             -u|--update) auto_update="1" ;;       # 命令行强制开启本次更新
+            -f|--force) allow_same_version_upgrade="1" ;; # 命令行强制同版本也执行迁移
             *) log "未知选项：$1"; exit 1 ;;
         esac
         shift
@@ -353,12 +355,14 @@ download_firmware() {
     if latest_url=$(resolve_latest_firmware_url); then
         latest_source_id=$(normalize_firmware_source_id "$latest_url")
         if [ "$latest_source_id" = "$cached_source_id" ] && validate_firmware_archive "$firmware_file"; then
+            FIRMWARE_STATUS="same"
             log "检测到固件版本未变化，且本地缓存可用，跳过下载。"
             return 0
         fi
     else
         log "版本探测失败，尝试使用本地缓存固件..."
         if validate_firmware_archive "$firmware_file"; then
+            FIRMWARE_STATUS="unknown"
             log "本地缓存固件可用，继续执行。"
             return 0
         fi
@@ -370,6 +374,7 @@ download_firmware() {
         if validate_firmware_archive "$temp_file"; then
             mv -f "$temp_file" "$firmware_file"
             printf '%s\n' "$latest_source_id" > "$state_file"
+            FIRMWARE_STATUS="new"
             log "下载成功，且固件完整性校验通过。"
             return 0
         fi
@@ -539,6 +544,12 @@ main() {
     prepare_container_config
     allocate_new_vmid
     download_firmware
+
+    if [ "$IS_NEW_INSTALL" -eq 0 ] && [ "$FIRMWARE_STATUS" = "same" ] && [ "$allow_same_version_upgrade" != "1" ]; then
+        log "固件版本未变化，默认跳过本次升级迁移（避免无意义切换容器）。"
+        log "如需强制同版本重装，请在 .conf 中设置 allow_same_version_upgrade=\"1\"。"
+        exit 0
+    fi
     
     perform_backup_and_stop_old
     provision_and_start_new
