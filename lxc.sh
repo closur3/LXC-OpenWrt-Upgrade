@@ -36,6 +36,7 @@ OLD_VMID=""
 NEW_VMID=""
 HOST_BACKUP_FILE=""
 FIRMWARE_STATUS="unknown"
+DRY_RUN=0
 ##################################################################################
 
 # ==================== 2. 动态配置管理 (生成与加载) ====================
@@ -113,6 +114,20 @@ check_command() {
     command -v "$1" >/dev/null 2>&1 || { log "缺少必要命令: $1"; exit 1; }
 }
 
+show_help() {
+    cat << 'EOF'
+用法:
+  bash lxc.sh [选项]
+
+选项:
+  -n, --no-backup   跳过备份与恢复
+  -u, --update      强制执行一次脚本自更新检查
+  -f, --force       即使固件版本未变化，也强制继续迁移流程
+  -d, --dry-run     仅检查流程与条件，不执行任何变更操作
+  -h, --help        显示本帮助并退出
+EOF
+}
+
 rollback() {
     log "正在启动故障保护：回滚启动旧容器，并彻底清理失败的新容器..."
     
@@ -164,13 +179,20 @@ parse_args() {
             -n|--no-backup) backup_enabled="0" ;; # 命令行强制跳过备份
             -u|--update) auto_update="1" ;;       # 命令行强制开启本次更新
             -f|--force) allow_same_version_upgrade="1" ;; # 命令行强制同版本也执行迁移
-            *) log "未知选项：$1"; exit 1 ;;
+            -d|--dry-run) DRY_RUN=1 ;;            # 仅检查流程，不做任何变更
+            -h|--help) show_help; exit 0 ;;
+            *) log "未知选项：$1"; echo; show_help; exit 1 ;;
         esac
         shift
     done
 }
 
 check_update() {
+    if [ "$DRY_RUN" -eq 1 ]; then
+        log "dry-run 模式：跳过脚本自更新。"
+        return 0
+    fi
+
     if [ "$auto_update" != "1" ]; then
         log "自动更新已禁用，直接运行本地版本。"
         return 0
@@ -370,6 +392,12 @@ download_firmware() {
         exit 1
     fi
 
+    if [ "$DRY_RUN" -eq 1 ]; then
+        FIRMWARE_STATUS="new"
+        log "dry-run 模式：检测到可能有新固件，将跳过实际下载。"
+        return 0
+    fi
+
     if wget --tries=2 --timeout=15 --dns-timeout=5 --connect-timeout=5 --read-timeout=15 -O "$temp_file" "$latest_url"; then
         if validate_firmware_archive "$temp_file"; then
             mv -f "$temp_file" "$firmware_file"
@@ -545,9 +573,14 @@ main() {
     allocate_new_vmid
     download_firmware
 
-    if [ "$IS_NEW_INSTALL" -eq 0 ] && [ "$FIRMWARE_STATUS" = "same" ] && [ "$allow_same_version_upgrade" != "1" ]; then
+    if [ "$IS_NEW_INSTALL" -eq 0 ] && [ "$FIRMWARE_STATUS" = "same" ] && [ "${allow_same_version_upgrade:-0}" != "1" ]; then
         log "固件版本未变化，默认跳过本次升级迁移（避免无意义切换容器）。"
-        log "如需强制同版本重装，请在 .conf 中设置 allow_same_version_upgrade=\"1\"。"
+        log "如需强制同版本重装，可使用 --force。"
+        exit 0
+    fi
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        log "dry-run 模式：检查完成。后续将执行备份、停旧容器、创建新容器、恢复并切换。"
         exit 0
     fi
     
