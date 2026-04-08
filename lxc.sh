@@ -318,18 +318,49 @@ validate_firmware_archive() {
     return 0
 }
 
+resolve_latest_firmware_url() {
+    local effective_url
+    effective_url=$(curl -fsSIL -o /dev/null -w '%{url_effective}' "$download_url" 2>/dev/null || true)
+    [ -n "$effective_url" ] || return 1
+    printf '%s\n' "$effective_url"
+    return 0
+}
+
 download_firmware() {
     log "正在下载 OpenWrt 最新版本..."
     local cache_dir="/var/lib/vz/template/cache"
     local firmware_file="$cache_dir/openwrt-x86-64-generic-rootfs.tar.gz"
     local temp_file="${firmware_file}.download.$$"
+    local state_file="${firmware_file}.source_url"
+    local latest_url=""
+    local cached_url=""
 
     mkdir -p "$cache_dir"
     rm -f "$temp_file"
 
-    if wget --tries=2 --timeout=15 --dns-timeout=5 --connect-timeout=5 --read-timeout=15 -O "$temp_file" "$download_url"; then
+    if [ -f "$state_file" ]; then
+        cached_url=$(cat "$state_file" 2>/dev/null || true)
+    fi
+
+    if latest_url=$(resolve_latest_firmware_url); then
+        if [ "$latest_url" = "$cached_url" ] && validate_firmware_archive "$firmware_file"; then
+            log "检测到固件版本未变化，且本地缓存可用，跳过下载。"
+            return 0
+        fi
+    else
+        log "版本探测失败，尝试使用本地缓存固件..."
+        if validate_firmware_archive "$firmware_file"; then
+            log "本地缓存固件可用，继续执行。"
+            return 0
+        fi
+        log "错误：无法探测最新版本，且本地缓存不可用。"
+        exit 1
+    fi
+
+    if wget --tries=2 --timeout=15 --dns-timeout=5 --connect-timeout=5 --read-timeout=15 -O "$temp_file" "$latest_url"; then
         if validate_firmware_archive "$temp_file"; then
             mv -f "$temp_file" "$firmware_file"
+            printf '%s\n' "$latest_url" > "$state_file"
             log "下载成功，且固件完整性校验通过。"
             return 0
         fi
