@@ -156,6 +156,8 @@ wait_container_ready() {
 
 init_environment() {
     [ "$(id -u)" -eq 0 ] || die "请使用 root 权限运行此脚本"
+    command -v pveversion >/dev/null 2>&1 || die "仅支持在 Proxmox VE (PVE) 宿主机运行（缺少 pveversion）。"
+    [ -d "/etc/pve" ] || die "仅支持在 Proxmox VE (PVE) 宿主机运行（缺少 /etc/pve）。"
     for cmd in pct qm wget curl awk grep sort uniq md5sum cat rm chmod gzip tar mv sed cut xargs seq wc mkdir dirname basename; do
         require_cmd "$cmd"
     done
