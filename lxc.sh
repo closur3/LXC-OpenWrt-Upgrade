@@ -402,7 +402,7 @@ download_firmware() {
         return 0
     fi
 
-    if wget --no-verbose --tries=2 --timeout=15 --dns-timeout=5 --connect-timeout=5 --read-timeout=15 -O "$temp_file" "$latest_url"; then
+    if wget -q --tries=2 --timeout=15 --dns-timeout=5 --connect-timeout=5 --read-timeout=15 -O "$temp_file" "$latest_url"; then
         if validate_firmware_archive "$temp_file"; then
             mv -f "$temp_file" "$firmware_file"
             printf '%s\n' "$latest_source_id" > "$state_file"
