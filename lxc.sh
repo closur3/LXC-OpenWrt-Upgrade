@@ -362,7 +362,6 @@ normalize_firmware_source_id() {
 }
 
 download_firmware() {
-    log "正在下载 OpenWrt 最新版本..."
     local cache_dir="/var/lib/vz/template/cache"
     local firmware_file="$cache_dir/openwrt-x86-64-generic-rootfs.tar.gz"
     local temp_file="${firmware_file}.download.$$"
@@ -402,6 +401,7 @@ download_firmware() {
         return 0
     fi
 
+    log "正在下载 OpenWrt 最新版本..."
     if wget -q --tries=2 --timeout=15 --dns-timeout=5 --connect-timeout=5 --read-timeout=15 -O "$temp_file" "$latest_url"; then
         if validate_firmware_archive "$temp_file"; then
             mv -f "$temp_file" "$firmware_file"
